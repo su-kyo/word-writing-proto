@@ -1,0 +1,1472 @@
+const QUESTION_TEXTS = [
+  "높임 표현",
+  "설레는 마음",
+  "도움을 주는 까닭",
+  "깨닫거나 다짐한 점을 쓴다.",
+  "우리는 모두 소중한 존재야!",
+];
+
+const PARROT_IMAGES = {
+  idle: "source/parrot_idle.png",
+  talking: "source/parrot_talking.png",
+  answering: "source/parrot_answering.png",
+  correct: "source/parrot_correct.png",
+  wrong: "source/parrot_wrong.png",
+  reveal: "source/parrot_reveal.png",
+};
+
+const {
+  VISIBLE_BOX_COUNT,
+  clamp,
+  createQuestion,
+  createEmptyBoxes,
+  moveViewportState,
+  ensureActiveBoxVisibleState,
+  getScrollNavState,
+} = window.HandwritingViewport;
+
+const LIFE_ICON_SRC = "source/ico-life.svg";
+const MOCK_DETECTED_CHARS = ["가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타"];
+const TTS_DURATION_MS = 3000;
+const WRONG_FEEDBACK_MS = 1500;
+const CORRECT_HOLD_MS = 2000;
+const app = document.getElementById("app");
+let currentScreenEnterClass = "";
+let lastRenderedScreen = null;
+let viewportStateFrame = 0;
+let scheduledViewport = null;
+
+const ERASER_ICON = `
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M21.41 11.58 12.42 2.59a2 2 0 0 0-2.83 0L2.59 9.59a2 2 0 0 0 0 2.83l6.99 6.99A2 2 0 0 0 11 20h8a1 1 0 1 0 0-2h-4.59l6-5.99a2 2 0 0 0 0-2.83ZM11 18l-7-7 7-7 7 7-7 7Z"
+      fill="currentColor"
+    />
+  </svg>
+`;
+
+const state = {
+  screen: "idle",
+  parrotMood: "idle",
+  currentQuestionIndex: 0,
+  attemptsLeft: 3,
+  activeLetterIndex: null,
+  viewportStartIndex: 0,
+  debugNextSubmit: null,
+  isDebugOpen: false,
+  showGhostOverlay: false,
+  questions: QUESTION_TEXTS.map(createQuestion),
+  currentBoxes: [],
+  pointerSession: null,
+  viewportDragSession: null,
+  viewportScrollLeft: 0,
+  pendingViewportTarget: null,
+  inputActivatedAt: 0,
+  disableInputEnterAnimation: false,
+  lastScrollIntent: null,
+  timers: [],
+};
+
+init();
+
+function init() {
+  resetLessonState();
+  syncAppHeight();
+  app.addEventListener("click", handleAppClick);
+  app.addEventListener("pointerdown", handleAppPointerDown);
+  window.addEventListener("resize", handleResize);
+  window.visualViewport?.addEventListener("resize", handleResize);
+  window.visualViewport?.addEventListener("scroll", handleResize);
+  window.addEventListener("keydown", handleKeyDown);
+  render();
+}
+
+function resetLessonState() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "idle";
+  state.parrotMood = "idle";
+  state.currentQuestionIndex = 0;
+  state.attemptsLeft = 3;
+  state.activeLetterIndex = null;
+  state.viewportStartIndex = 0;
+  state.debugNextSubmit = null;
+  state.isDebugOpen = false;
+  state.showGhostOverlay = false;
+  state.questions = QUESTION_TEXTS.map(createQuestion);
+  resetCurrentQuestionProgress();
+}
+
+function resetCurrentQuestionProgress() {
+  const question = getCurrentQuestion();
+  state.currentBoxes = createEmptyBoxes(question.chars);
+  state.activeLetterIndex = null;
+  state.viewportStartIndex = 0;
+  state.viewportScrollLeft = 0;
+  state.pendingViewportTarget = null;
+  state.inputActivatedAt = 0;
+}
+
+function getCurrentQuestion() {
+  return state.questions[state.currentQuestionIndex];
+}
+
+function clearTimers() {
+  state.timers.forEach((timerId) => window.clearTimeout(timerId));
+  state.timers = [];
+}
+
+function queueTimer(callback, delay) {
+  const timerId = window.setTimeout(() => {
+    state.timers = state.timers.filter((id) => id !== timerId);
+    callback();
+  }, delay);
+  state.timers.push(timerId);
+}
+
+function handleResize() {
+  syncAppHeight();
+  if (["input", "wrongFeedback", "correctWaiting", "failedWaiting", "reveal", "result"].includes(state.screen)) {
+    setupCanvases();
+    window.requestAnimationFrame(syncWritingViewport);
+  }
+}
+
+function handleKeyDown(event) {
+  if (event.key !== "Escape" || event.defaultPrevented) {
+    return;
+  }
+
+  state.isDebugOpen = !state.isDebugOpen;
+  render();
+}
+
+function handleAppClick(event) {
+  if (
+    state.screen === "input" &&
+    state.activeLetterIndex !== null &&
+    !event.target.closest(".paper-box") &&
+    !event.target.closest(".writing-item__erase") &&
+    !event.target.closest("[data-action]") &&
+    !event.target.closest(".writing-viewport")
+  ) {
+    state.activeLetterIndex = null;
+    state.pendingViewportTarget = null;
+    render();
+    return;
+  }
+
+  const debugButton = event.target.closest("[data-debug-choice]");
+  if (debugButton) {
+    const choice = debugButton.dataset.debugChoice;
+    state.debugNextSubmit = state.debugNextSubmit === choice ? null : choice;
+    render();
+    return;
+  }
+
+  const ghostToggle = event.target.closest("[data-toggle-ghost]");
+  if (ghostToggle && state.screen === "reveal") {
+    state.showGhostOverlay = !state.showGhostOverlay;
+    render();
+    return;
+  }
+
+  const actionButton = event.target.closest("[data-action]");
+  if (!actionButton) {
+    return;
+  }
+
+  const action = actionButton.dataset.action;
+
+  switch (action) {
+    case "start-tts":
+      startTtsPhase();
+      break;
+    case "finish-lesson":
+      enterResultScreen();
+      break;
+    case "reveal-answer":
+      enterRevealPhase();
+      break;
+    case "next-question":
+      goToNextQuestion();
+      break;
+    case "view-result":
+      enterResultScreen();
+      break;
+    case "restart-lesson":
+      resetLessonState();
+      render();
+      break;
+    case "nav-prev":
+      moveViewport(-3);
+      break;
+    case "nav-next":
+      moveViewport(3);
+      break;
+    case "clear-all":
+      clearAllBoxes();
+      break;
+    case "erase-active":
+      eraseBox(state.activeLetterIndex);
+      break;
+    case "submit-answer":
+      submitCurrentAnswer();
+      break;
+    default:
+      break;
+  }
+}
+
+function handleAppPointerDown(event) {
+  if (state.screen !== "input") {
+    return;
+  }
+
+  if (performance.now() - state.inputActivatedAt < 180) {
+    return;
+  }
+
+  const actionTarget = event.target.closest("[data-action]");
+  if (actionTarget && !event.target.closest(".paper-box")) {
+    return;
+  }
+
+  const viewport = event.target.closest(".writing-viewport");
+  const boxElement = event.target.closest(".writing-item[data-box-index]");
+  const surface = event.target.closest(".paper-box");
+
+  if (!surface && viewport) {
+    beginViewportDrag(event, viewport);
+    return;
+  }
+
+  if (!boxElement) {
+    return;
+  }
+
+  const boxIndex = Number(boxElement.dataset.boxIndex);
+  if (!Number.isFinite(boxIndex)) {
+    return;
+  }
+
+  if (boxIndex !== state.activeLetterIndex) {
+    state.activeLetterIndex = boxIndex;
+    ensureActiveBoxVisible();
+    render();
+    return;
+  }
+
+  if (!surface) {
+    return;
+  }
+
+  const canvas = boxElement.querySelector('canvas[data-canvas-role="input"]');
+  if (!canvas) {
+    return;
+  }
+
+  beginStroke(event, boxIndex, canvas);
+}
+
+function beginStroke(event, boxIndex, canvas) {
+  event.preventDefault();
+
+  const point = getNormalizedPoint(event, canvas);
+  const box = state.currentBoxes[boxIndex];
+  const stroke = {
+    points: [point],
+  };
+
+  box.strokes.push(stroke);
+  state.pointerSession = {
+    pointerId: event.pointerId,
+    boxIndex,
+    canvas,
+    stroke,
+  };
+
+  if (typeof canvas.setPointerCapture === "function") {
+    canvas.setPointerCapture(event.pointerId);
+  }
+
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", handlePointerUp);
+  window.addEventListener("pointercancel", handlePointerUp);
+  redrawCanvasesForBox(boxIndex);
+}
+
+function handlePointerMove(event) {
+  const session = state.pointerSession;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const point = getNormalizedPoint(event, session.canvas);
+  const lastPoint = session.stroke.points[session.stroke.points.length - 1];
+  const deltaX = point.x - lastPoint.x;
+  const deltaY = point.y - lastPoint.y;
+  const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+  if (distance < 0.003) {
+    return;
+  }
+
+  session.stroke.points.push(point);
+  redrawCanvasesForBox(session.boxIndex);
+}
+
+function handlePointerUp(event) {
+  const session = state.pointerSession;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+
+  const question = getCurrentQuestion();
+  const box = state.currentBoxes[session.boxIndex];
+  const answerChar = question.chars[session.boxIndex];
+
+  if (typeof session.canvas.releasePointerCapture === "function") {
+    try {
+      session.canvas.releasePointerCapture(event.pointerId);
+    } catch (error) {
+      // Pointer capture may already be released.
+    }
+  }
+
+  box.detected = hasStroke(box) ? getMockDetectedValue(answerChar, session.boxIndex) : "";
+
+  stopPointerSession();
+  render();
+}
+
+function beginViewportDrag(event, viewport) {
+  event.preventDefault();
+
+  state.viewportDragSession = {
+    pointerId: event.pointerId,
+    viewport,
+    startClientX: event.clientX,
+    startScrollLeft: viewport.scrollLeft,
+    shouldClearFocus: state.activeLetterIndex !== null,
+    didDrag: false,
+  };
+
+  if (typeof viewport.setPointerCapture === "function") {
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch (error) {
+      // Ignore capture failures on non-canvas elements.
+    }
+  }
+
+  window.addEventListener("pointermove", handleViewportDragMove);
+  window.addEventListener("pointerup", handleViewportDragEnd);
+  window.addEventListener("pointercancel", handleViewportDragEnd);
+}
+
+function handleViewportDragMove(event) {
+  const session = state.viewportDragSession;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+
+  const deltaX = event.clientX - session.startClientX;
+  if (Math.abs(deltaX) > 6) {
+    session.didDrag = true;
+  }
+  const maxScrollLeft = Math.max(0, session.viewport.scrollWidth - session.viewport.clientWidth);
+  const nextScrollLeft = clamp(session.startScrollLeft - deltaX, 0, maxScrollLeft);
+
+  session.viewport.scrollLeft = nextScrollLeft;
+  state.viewportScrollLeft = nextScrollLeft;
+  scheduleViewportStateSync(session.viewport);
+}
+
+function handleViewportDragEnd(event) {
+  const session = state.viewportDragSession;
+  if (!session || event.pointerId !== session.pointerId) {
+    return;
+  }
+
+  if (typeof session.viewport.releasePointerCapture === "function") {
+    try {
+      session.viewport.releasePointerCapture(event.pointerId);
+    } catch (error) {
+      // Pointer capture may already be released.
+    }
+  }
+
+  const shouldClearFocus = session.shouldClearFocus && !session.didDrag;
+  state.viewportDragSession = null;
+  window.removeEventListener("pointermove", handleViewportDragMove);
+  window.removeEventListener("pointerup", handleViewportDragEnd);
+  window.removeEventListener("pointercancel", handleViewportDragEnd);
+
+  if (shouldClearFocus) {
+    state.activeLetterIndex = null;
+    state.pendingViewportTarget = null;
+    render();
+    return;
+  }
+
+  updateNavState(session.viewport);
+}
+
+function stopPointerSession() {
+  state.pointerSession = null;
+  window.removeEventListener("pointermove", handlePointerMove);
+  window.removeEventListener("pointerup", handlePointerUp);
+  window.removeEventListener("pointercancel", handlePointerUp);
+}
+
+function getNormalizedPoint(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const x = clamp((event.clientX - rect.left) / rect.width, 0, 1);
+  const y = clamp((event.clientY - rect.top) / rect.height, 0, 1);
+  return { x, y };
+}
+
+function startTtsPhase() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "tts";
+  state.parrotMood = "talking";
+  render();
+  queueTimer(() => {
+    enterInputPhase(false);
+  }, TTS_DURATION_MS);
+}
+
+function enterInputPhase(preserveWriting) {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "input";
+  state.parrotMood = "answering";
+  state.disableInputEnterAnimation = preserveWriting;
+  state.pendingViewportTarget = null;
+  state.lastScrollIntent = null;
+  if (!preserveWriting) {
+    resetCurrentQuestionProgress();
+  }
+  state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+  ensureActiveBoxVisible({ behavior: preserveWriting ? "smooth" : "auto", defer: preserveWriting });
+  state.inputActivatedAt = performance.now();
+  render();
+}
+
+function enterWrongFeedbackPhase() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "wrongFeedback";
+  state.parrotMood = "wrong";
+  render();
+  queueTimer(() => {
+    if (state.attemptsLeft > 0) {
+      enterInputPhase(true);
+    } else {
+      enterFailedWaitingPhase();
+    }
+  }, WRONG_FEEDBACK_MS);
+}
+
+function enterCorrectWaitingPhase() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "correctWaiting";
+  state.parrotMood = "correct";
+  render();
+  queueTimer(() => {
+    state.parrotMood = "idle";
+    render();
+  }, CORRECT_HOLD_MS);
+}
+
+function enterFailedWaitingPhase() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "failedWaiting";
+  state.parrotMood = "idle";
+  render();
+}
+
+function enterRevealPhase() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "reveal";
+  state.parrotMood = "reveal";
+  state.showGhostOverlay = false;
+  render();
+}
+
+function goToNextQuestion() {
+  if (state.currentQuestionIndex >= state.questions.length - 1) {
+    enterResultScreen();
+    return;
+  }
+
+  clearTimers();
+  stopPointerSession();
+  state.currentQuestionIndex += 1;
+  state.attemptsLeft = 3;
+  state.parrotMood = "talking";
+  state.debugNextSubmit = null;
+  state.showGhostOverlay = false;
+  resetCurrentQuestionProgress();
+  startTtsPhase();
+}
+
+function enterResultScreen() {
+  clearTimers();
+  stopPointerSession();
+  state.screen = "result";
+  state.parrotMood = "idle";
+  state.isDebugOpen = false;
+  render();
+}
+
+function moveViewport(step) {
+  if (state.screen !== "input") {
+    return;
+  }
+
+  const viewport = app.querySelector(".writing-viewport");
+  if (!viewport) {
+    const question = getCurrentQuestion();
+    const nextState = moveViewportState(
+      {
+        viewportStartIndex: state.viewportStartIndex,
+        activeLetterIndex: state.activeLetterIndex,
+      },
+      question.chars.length,
+      VISIBLE_BOX_COUNT,
+      step
+    );
+    state.viewportStartIndex = nextState.viewportStartIndex;
+    render();
+    return;
+  }
+
+  const nextScrollLeft = getViewportScrollTarget(viewport, step);
+  state.lastScrollIntent = "nav";
+  viewport.scrollTo({ left: nextScrollLeft, top: 0, behavior: "auto" });
+  state.viewportScrollLeft = nextScrollLeft;
+  syncViewportStateFromDom(viewport);
+  updateNavState(viewport);
+}
+
+function ensureActiveBoxVisible(options = {}) {
+  if (state.activeLetterIndex === null) {
+    state.pendingViewportTarget = null;
+    return;
+  }
+
+  state.lastScrollIntent = "focus";
+  state.pendingViewportTarget = {
+    type: "box",
+    index: state.activeLetterIndex,
+    align: "safe-center",
+    behavior: options.behavior || "auto",
+    defer: Boolean(options.defer),
+  };
+
+  const viewport = app.querySelector(".writing-viewport");
+  if (!viewport) {
+    const question = getCurrentQuestion();
+    const nextState = ensureActiveBoxVisibleState(
+      {
+        viewportStartIndex: state.viewportStartIndex,
+        activeLetterIndex: state.activeLetterIndex,
+      },
+      question.chars.length,
+      VISIBLE_BOX_COUNT
+    );
+
+    state.viewportStartIndex = nextState.viewportStartIndex;
+  }
+}
+
+function eraseBox(boxIndex) {
+  const box = state.currentBoxes[boxIndex];
+  if (!box) {
+    return;
+  }
+
+  box.strokes = [];
+  box.detected = "";
+  redrawCanvasesForBox(boxIndex);
+  render();
+}
+
+function clearAllBoxes() {
+  state.currentBoxes.forEach((box) => {
+    box.strokes = [];
+    box.detected = "";
+  });
+  state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+  ensureActiveBoxVisible({ behavior: "auto" });
+  render();
+}
+
+function submitCurrentAnswer() {
+  if (!canSubmitCurrentAnswer()) {
+    return;
+  }
+
+  const question = getCurrentQuestion();
+  const attemptsLeftAtSubmit = state.attemptsLeft;
+  const snapshot = cloneCurrentBoxes();
+  const detectedText = buildDetectedText(snapshot, question.chars);
+
+  let isCorrect = false;
+  if (state.debugNextSubmit === "correct") {
+    isCorrect = true;
+  } else if (state.debugNextSubmit === "wrong") {
+    isCorrect = false;
+  } else {
+    isCorrect = detectedText === question.text;
+  }
+
+  question.attempts.push({
+    questionIndex: state.currentQuestionIndex,
+    questionText: question.text,
+    submissionOrder: question.attempts.length + 1,
+    strokesByIndex: snapshot.map((box) => box.strokes),
+    detectedByIndex: snapshot.map((box) => box.detected),
+    detectedText,
+    isCorrect,
+    attemptsLeftAtSubmit,
+  });
+
+  state.debugNextSubmit = null;
+  state.activeLetterIndex = null;
+  state.pendingViewportTarget = null;
+
+  if (isCorrect) {
+    question.finalStatus = "correct";
+    enterCorrectWaitingPhase();
+    return;
+  }
+
+  state.attemptsLeft -= 1;
+  if (state.attemptsLeft <= 0) {
+    question.finalStatus = "wrong";
+  }
+
+  enterWrongFeedbackPhase();
+}
+
+function cloneCurrentBoxes() {
+  return state.currentBoxes.map((box) => ({
+    detected: box.detected,
+    strokes: box.strokes.map((stroke) => ({
+      points: stroke.points.map((point) => ({ x: point.x, y: point.y })),
+    })),
+  }));
+}
+
+function buildDetectedText(boxes, chars) {
+  return chars
+    .map((char, index) => boxes[index].detected || (char === " " ? " " : ""))
+    .join("");
+}
+
+function hasStroke(box) {
+  return box.strokes.some((stroke) => stroke.points.length > 0);
+}
+
+function canSubmitCurrentAnswer() {
+  const question = getCurrentQuestion();
+  return question.chars.some((char, index) => char !== " " && hasStroke(state.currentBoxes[index]));
+}
+
+function hasAnyWriting() {
+  return state.currentBoxes.some((box) => hasStroke(box));
+}
+
+function getLatestAttempt(question = getCurrentQuestion()) {
+  return question.attempts[question.attempts.length - 1] || null;
+}
+
+function getQuestionProgressLabel() {
+  return `문제 ${state.currentQuestionIndex + 1} / ${state.questions.length}`;
+}
+
+function getTeacherActions() {
+  switch (state.screen) {
+    case "idle":
+      return [
+        { action: "start-tts", label: "TTS 재생", variant: "primary" },
+        { action: "finish-lesson", label: "종료", variant: "ghost" },
+      ];
+    case "tts":
+    case "input":
+    case "wrongFeedback":
+      return [{ action: "finish-lesson", label: "종료", variant: "ghost" }];
+    case "correctWaiting":
+    case "failedWaiting":
+      return [
+        { action: "reveal-answer", label: "정답 공개", variant: "primary" },
+        { action: "finish-lesson", label: "종료", variant: "ghost" },
+      ];
+    case "reveal":
+      return [
+        {
+          action: state.currentQuestionIndex >= state.questions.length - 1 ? "view-result" : "next-question",
+          label: state.currentQuestionIndex >= state.questions.length - 1 ? "결과 보기" : "다음 문제",
+          variant: "primary",
+        },
+        { action: "finish-lesson", label: "종료", variant: "ghost" },
+      ];
+    case "result":
+      return [{ action: "restart-lesson", label: "다시 시작", variant: "primary" }];
+    default:
+      return [];
+  }
+}
+
+function render() {
+  const isResult = state.screen === "result";
+  currentScreenEnterClass = lastRenderedScreen !== state.screen ? getScreenEnterClass(state.screen) : "";
+  app.innerHTML = `
+    <div class="prototype-shell${isResult ? " is-result" : ""}">
+      ${renderTopPanels()}
+      ${renderDebugPanel()}
+      ${renderParrotStage()}
+      ${renderScreen()}
+      ${isResult ? '<div class="result-illustration" aria-hidden="true"></div>' : ""}
+    </div>
+  `;
+  lastRenderedScreen = state.screen;
+  setupCanvases();
+  window.requestAnimationFrame(syncWritingViewport);
+}
+
+function getScreenEnterClass(screen) {
+  switch (screen) {
+    case "input":
+      return state.disableInputEnterAnimation ? "" : "screen--enter-input";
+    case "correctWaiting":
+    case "failedWaiting":
+      return "screen--enter-waiting";
+    default:
+      return "";
+  }
+}
+
+function renderTopPanels() {
+  return `
+    <aside class="top-panels">
+      <section class="control-panel">
+        <p class="control-panel__title">Teacher Control</p>
+        <p class="control-panel__meta">${escapeHtml(getQuestionProgressLabel())}</p>
+        <div class="control-panel__actions">
+          ${getTeacherActions()
+            .map(
+              ({ action, label, variant }) => `
+                <button class="panel-button panel-button--${variant}" data-action="${action}">
+                  ${escapeHtml(label)}
+                </button>
+              `
+            )
+            .join("")}
+        </div>
+      </section>
+    </aside>
+  `;
+}
+
+function renderDebugPanel() {
+  if (!state.isDebugOpen || state.screen === "result") {
+    return "";
+  }
+
+  const isInteractive = ["idle", "tts", "input", "wrongFeedback"].includes(state.screen);
+  return `
+    <section class="debug-panel" role="dialog" aria-label="Prototype Debug">
+      <p class="debug-panel__title">Prototype Debug</p>
+      <p class="debug-panel__meta">ESC 로 닫기 · 다음 제출 판정만 강제합니다.</p>
+      <div class="debug-panel__actions">
+        <button
+          class="debug-button${state.debugNextSubmit === "correct" ? " is-active" : ""}"
+          data-debug-choice="correct"
+          ${isInteractive ? "" : "disabled"}
+        >
+          다음 제출 정답 처리
+        </button>
+        <button
+          class="debug-button${state.debugNextSubmit === "wrong" ? " is-active" : ""}"
+          data-debug-choice="wrong"
+          ${isInteractive ? "" : "disabled"}
+        >
+          다음 제출 오답 처리
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderParrotStage() {
+  if (state.screen === "result") {
+    return '<section class="parrot-stage is-hidden" aria-hidden="true"></section>';
+  }
+
+  return `
+    <section class="parrot-stage" aria-hidden="true">
+      <div class="parrot-stage__set">
+        <img class="speaker speaker--left" src="source/speaker.png" alt="" />
+        <div class="parrot-wrap">
+          <img class="parrot-visual" src="${PARROT_IMAGES[state.parrotMood]}" alt="" />
+        </div>
+        <img class="speaker speaker--right" src="source/speaker.png" alt="" />
+      </div>
+    </section>
+  `;
+}
+
+function renderScreen() {
+  switch (state.screen) {
+    case "idle":
+      return renderIdleScreen();
+    case "tts":
+      return renderTtsScreen();
+    case "input":
+    case "wrongFeedback":
+      return renderInputScreen();
+    case "correctWaiting":
+      return renderWaitingScreen(true);
+    case "failedWaiting":
+      return renderWaitingScreen(false);
+    case "reveal":
+      return renderRevealScreen();
+    case "result":
+      return renderResultScreen();
+    default:
+      return "";
+  }
+}
+
+function renderIdleScreen() {
+  return `
+    <main class="screen idle-screen">
+      <section class="idle-card screen__content">
+        <h1 class="idle-card__title">손글씨 받아쓰기 준비 완료</h1>
+        <p class="idle-card__body">오른쪽 상단의 <strong>TTS 재생</strong> 버튼으로 활동을 시작하세요.</p>
+      </section>
+    </main>
+  `;
+}
+
+function renderTtsScreen() {
+  return `
+    <main class="screen tts-screen">
+      <div class="screen__dim screen__dim--soft"></div>
+      <section class="tts-card screen__content">
+        <h1 class="tts-card__title">선생님 화면에서 재생되는 문장을 잘 들어주세요!</h1>
+        <p class="tts-card__body">3초 뒤에 손글씨 입력 화면으로 자동 전환됩니다.</p>
+      </section>
+    </main>
+  `;
+}
+
+function renderInputScreen() {
+  const question = getCurrentQuestion();
+  const isWrongFeedback = state.screen === "wrongFeedback";
+
+  return `
+    <main class="screen input-screen${currentScreenEnterClass ? ` ${currentScreenEnterClass}` : ""}">
+      <div class="screen__dim screen__dim--flat"></div>
+      <section class="input-shell screen__content">
+        <div class="activity-stack">
+          <div class="input-head">
+            ${renderLifeRow()}
+          </div>
+          <div class="preview-cluster preview-cluster--input">
+            <div class="preview-row preview-row--input" aria-label="preview letter boxes">
+              ${question.chars.map((char, index) => renderPreviewBox(char, index, "input")).join("")}
+            </div>
+          </div>
+          <section class="writing-panel">
+            <button class="nav-rail nav-rail--prev" data-action="nav-prev" aria-label="이전 글자 칸">
+              <span aria-hidden="true">‹</span>
+            </button>
+            <div class="writing-viewport">
+              <div class="writing-row${isWrongFeedback ? " is-wrong" : ""}" data-writing-row>
+                ${question.chars.map((_, index) => renderWritingBox(index, isWrongFeedback)).join("")}
+              </div>
+            </div>
+            <button class="nav-rail nav-rail--next" data-action="nav-next" aria-label="다음 글자 칸">
+              <span aria-hidden="true">›</span>
+            </button>
+          </section>
+          <div class="button-area button-area--input">
+            <button class="cta-button" data-action="submit-answer" ${canSubmitCurrentAnswer() && !isWrongFeedback ? "" : "disabled"}>
+              답안 제출
+            </button>
+            <button class="clear-all-button" data-action="clear-all" ${hasAnyWriting() && !isWrongFeedback ? "" : "disabled"}>
+              <span class="icon icon--eraser">${ERASER_ICON}</span>
+              <span>전체 지우기</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function renderWritingBox(index, isWrongFeedback) {
+  const box = state.currentBoxes[index];
+  const isActive = index === state.activeLetterIndex;
+  const isWarning = isWrongFeedback && hasStroke(box);
+  const detectedText = box.detected;
+
+  return `
+    <article class="writing-item${isActive ? " is-active" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
+      <div class="writing-item__surface-shell">
+        <div class="writing-item__surface">
+          <div class="paper-box${isWarning ? " is-warning" : ""}">
+            <div class="guide-grid" aria-hidden="true"></div>
+            <canvas class="letter-canvas" data-canvas-role="input" data-box-index="${index}" data-theme="input"></canvas>
+          </div>
+          ${
+            isActive
+              ? `
+                <button class="writing-item__erase" data-action="erase-active" aria-label="현재 칸 지우기" ${state.screen === "input" ? "" : "disabled"}>
+                  <span class="icon icon--eraser">${ERASER_ICON}</span>
+                </button>
+              `
+              : ""
+          }
+        </div>
+      </div>
+      <div class="detected-pill${detectedText ? "" : " is-empty"}">${escapeHtml(detectedText)}</div>
+    </article>
+  `;
+}
+
+function renderPreviewBox(char, index, context) {
+  const isActive = context === "input" && index === state.activeLetterIndex;
+  const isBlank = char === " ";
+  const theme = context === "waiting" ? "waiting-preview" : "preview";
+  const role = context === "waiting" ? "waiting-preview" : "preview";
+
+  return `
+    <div class="preview-box preview-box--${context}${isActive ? " is-active" : ""}${isBlank ? " is-blank" : ""}" data-preview-index="${index}">
+      <div class="guide-grid guide-grid--preview" aria-hidden="true"></div>
+      <canvas class="letter-canvas letter-canvas--preview" data-canvas-role="${role}" data-box-index="${index}" data-theme="${theme}"></canvas>
+    </div>
+  `;
+}
+
+function renderLifeRow() {
+  return `
+    <div class="life-row" aria-label="남은 기회">
+      ${[0, 1, 2]
+        .map(
+          (index) => `
+            <span class="life-icon${index < state.attemptsLeft ? "" : " is-off"}">
+              <img src="${LIFE_ICON_SRC}" alt="" />
+            </span>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderWaitingScreen(isCorrect) {
+  const question = getCurrentQuestion();
+  const ctaText = isCorrect ? "정답!" : "답안 제출";
+  const latestAttempt = getLatestAttempt(question);
+
+  return `
+    <main class="screen waiting-screen${currentScreenEnterClass ? ` ${currentScreenEnterClass}` : ""}">
+      <div class="screen__dim screen__dim--flat"></div>
+      <section class="waiting-shell screen__content">
+        <div class="waiting-stack">
+          ${renderLifeRow()}
+          <div class="preview-done" aria-label="preview done">
+            <div class="preview-row preview-row--waiting">
+            ${question.chars
+              .map((char, index) => renderPreviewBox(char, index, "waiting"))
+              .join("")}
+            </div>
+          </div>
+          <div class="button-area button-area--waiting">
+            <button class="cta-button${isCorrect ? " cta-button--success" : ""}" disabled data-attempt-order="${latestAttempt?.submissionOrder || 0}">
+              ${escapeHtml(ctaText)}
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function renderRevealScreen() {
+  const question = getCurrentQuestion();
+  return `
+    <main class="screen reveal-screen">
+      <div class="screen__dim screen__dim--soft"></div>
+      <section class="reveal-shell screen__content">
+        <div class="revealed-answer">
+          <div class="answer-bubble">
+            <div class="answer-bubble__body">${escapeHtml(question.text)}</div>
+            <div class="answer-bubble__tail"></div>
+          </div>
+        </div>
+        <section class="reveal-panel">
+          <div class="reveal-panel__header">
+            <div class="reveal-panel__header-main">
+              <h2 class="reveal-panel__title">내가 제출한 답안</h2>
+              <button class="toggle-wrap${state.showGhostOverlay ? " is-active" : ""}" data-toggle-ghost>
+                <span>겹쳐 보기</span>
+                <span class="toggle-switch" aria-hidden="true"></span>
+              </button>
+            </div>
+            <span class="reveal-panel__chevron" aria-hidden="true">⌃</span>
+          </div>
+          <div class="answer-table">
+            ${question.attempts.map((attempt, attemptIndex) => renderRevealRow(question, attempt, attemptIndex)).join("")}
+            ${renderCorrectAnswerRow(question)}
+          </div>
+        </section>
+      </section>
+    </main>
+  `;
+}
+
+function renderRevealRow(question, attempt, attemptIndex) {
+  return `
+    <div class="answer-row${attempt.isCorrect ? " is-correct" : ""}">
+      <div class="answer-row__label">${attempt.submissionOrder}차</div>
+      <div class="answer-row__boxes">
+        ${question.chars
+          .map(
+            (char, boxIndex) => `
+              <div class="attempt-box${char === " " ? " attempt-box--empty" : ""}">
+                <div class="attempt-box__paper"></div>
+                ${state.showGhostOverlay && char !== " " ? `<span class="attempt-box__ghost">${escapeHtml(char)}</span>` : ""}
+                <canvas
+                  class="attempt-box__canvas"
+                  data-canvas-role="attempt"
+                  data-question-index="${state.currentQuestionIndex}"
+                  data-attempt-index="${attemptIndex}"
+                  data-box-index="${boxIndex}"
+                  data-theme="reveal"
+                ></canvas>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderCorrectAnswerRow(question) {
+  return `
+    <div class="answer-row answer-row--answer">
+      <div class="answer-row__label">정답</div>
+      <div class="answer-row__boxes">
+        ${question.chars
+          .map(
+            (char) => `
+              <div class="attempt-box attempt-box--correct-answer">
+                <div class="attempt-box__paper"></div>
+                ${char === " " ? "" : `<span class="attempt-box__answer">${escapeHtml(char)}</span>`}
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderResultScreen() {
+  return `
+    <main class="screen screen--result">
+      <section class="result-screen screen__content">
+        <header class="result-header">
+          <p class="result-header__eyebrow">받아쓰기</p>
+          <div class="result-ribbon">타이틀을 입력해주세요.</div>
+        </header>
+        <section class="result-questions">
+          ${state.questions.map((question, questionIndex) => renderResultCard(question, questionIndex)).join("")}
+        </section>
+      </section>
+    </main>
+  `;
+}
+
+function renderResultCard(question, questionIndex) {
+  const rows = question.attempts.length
+    ? question.attempts.map((attempt, attemptIndex) => renderResultAttemptRow(question, attempt, questionIndex, attemptIndex)).join("")
+    : '<p class="result-card__note">아직 제출한 시도가 없습니다.</p>';
+
+  return `
+    <article class="result-card${question.finalStatus === "wrong" ? " is-final-wrong" : ""}">
+      ${question.finalStatus === "correct" ? '<img class="result-correct-badge" src="source/ico-correct.svg" alt="정답" />' : ""}
+      <h2 class="result-card__title">${escapeHtml(question.text)}</h2>
+      <div class="result-attempts">
+        ${rows}
+      </div>
+    </article>
+  `;
+}
+
+function renderResultAttemptRow(question, attempt, questionIndex, attemptIndex) {
+  return `
+    <div class="result-letter-row${attempt.isCorrect ? " is-correct" : " is-wrong"}">
+        ${question.chars
+          .map((char, boxIndex) => `
+              <div class="result-letter-box${char === " " ? " is-blank" : ""}">
+                <div class="guide-grid guide-grid--result" aria-hidden="true"></div>
+                <canvas
+                  class="result-letter-box__canvas"
+                  data-canvas-role="result-attempt"
+                  data-question-index="${questionIndex}"
+                  data-attempt-index="${attemptIndex}"
+                  data-box-index="${boxIndex}"
+                  data-theme="${attempt.isCorrect ? "result-correct" : "result-wrong"}"
+                ></canvas>
+              </div>
+            `)
+          .join("")}
+    </div>
+  `;
+}
+
+function setupCanvases() {
+  const canvases = app.querySelectorAll("canvas[data-canvas-role]");
+  canvases.forEach((canvas) => drawCanvas(canvas));
+}
+
+function redrawCanvasesForBox(boxIndex) {
+  const canvases = app.querySelectorAll(`canvas[data-box-index="${boxIndex}"][data-canvas-role]`);
+  canvases.forEach((canvas) => drawCanvas(canvas));
+}
+
+function drawCanvas(canvas) {
+  const size = resizeCanvasIfNeeded(canvas);
+  if (!size) {
+    return;
+  }
+
+  const context = canvas.getContext("2d");
+  context.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
+  context.clearRect(0, 0, size.width, size.height);
+
+  const strokes = resolveCanvasStrokes(canvas);
+  const lineColor = resolveLineColor(canvas.dataset.theme);
+  const lineWidth = resolveLineWidth(canvas.dataset.theme, size.width);
+  drawStrokes(context, size.width, size.height, strokes, lineColor, lineWidth);
+}
+
+function resizeCanvasIfNeeded(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const nextWidth = Math.round(rect.width * dpr);
+  const nextHeight = Math.round(rect.height * dpr);
+  if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+    canvas.width = nextWidth;
+    canvas.height = nextHeight;
+  }
+
+  return {
+    dpr,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function resolveCanvasStrokes(canvas) {
+  const role = canvas.dataset.canvasRole;
+  const boxIndex = Number(canvas.dataset.boxIndex);
+
+  if (role === "input") {
+    return state.currentBoxes[boxIndex]?.strokes || [];
+  }
+
+  if (role === "preview") {
+    return state.currentBoxes[boxIndex]?.strokes || [];
+  }
+
+  if (role === "waiting-preview") {
+    return getLatestAttempt()?.strokesByIndex?.[boxIndex] || [];
+  }
+
+  if (role === "attempt" || role === "result-attempt") {
+    const questionIndex = Number(canvas.dataset.questionIndex);
+    const attemptIndex = Number(canvas.dataset.attemptIndex);
+    return state.questions[questionIndex]?.attempts[attemptIndex]?.strokesByIndex?.[boxIndex] || [];
+  }
+
+  return [];
+}
+
+function resolveLineColor(theme) {
+  switch (theme) {
+    case "preview":
+    case "waiting-preview":
+      return "#1b2036";
+    case "reveal":
+      return "#f8fbff";
+    case "result-correct":
+      return "#111111";
+    case "result-wrong":
+      return "#111111";
+    case "input":
+    default:
+      return "#181c2f";
+  }
+}
+
+function resolveLineWidth(theme, rectWidth) {
+  if (
+    theme === "preview" ||
+    theme === "waiting-preview" ||
+    theme === "reveal" ||
+    theme === "result-correct" ||
+    theme === "result-wrong"
+  ) {
+    return Math.max(1.4, rectWidth * 0.09);
+  }
+
+  return Math.max(4, rectWidth * 0.04);
+}
+
+function syncWritingViewport() {
+  const viewport = app.querySelector(".writing-viewport");
+  if (!viewport) {
+    return;
+  }
+
+  const pendingTarget = state.pendingViewportTarget;
+  if (pendingTarget && pendingTarget.type === "box") {
+    const targetBox = app.querySelector(`.writing-item[data-box-index="${pendingTarget.index}"]`);
+    if (targetBox) {
+      const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      const nextLeft =
+        pendingTarget.align === "safe-center"
+          ? getSafeViewportTarget(viewport, targetBox, maxScrollLeft)
+          : clamp(targetBox.offsetLeft - 8, 0, maxScrollLeft);
+
+      const applyScroll = () => {
+        viewport.scrollTo({
+          left: clamp(nextLeft, 0, maxScrollLeft),
+          top: 0,
+          behavior: pendingTarget.behavior || "auto",
+        });
+        state.viewportScrollLeft = clamp(nextLeft, 0, maxScrollLeft);
+        syncViewportStateFromDom(viewport);
+        updateNavState(viewport);
+      };
+
+      if (pendingTarget.defer) {
+        window.requestAnimationFrame(applyScroll);
+      } else {
+        applyScroll();
+      }
+    }
+    state.pendingViewportTarget = null;
+  } else if (state.viewportScrollLeft > 0) {
+    const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    viewport.scrollLeft = clamp(state.viewportScrollLeft, 0, maxScrollLeft);
+  }
+
+  bindViewportEvents(viewport);
+  syncViewportStateFromDom(viewport);
+  updateNavState(viewport);
+}
+
+function syncAppHeight() {
+  const visualHeight = window.visualViewport?.height || 0;
+  const viewportHeight = Math.max(visualHeight, window.innerHeight, document.documentElement.clientHeight || 0);
+  document.documentElement.style.setProperty("--app-height", `${Math.round(viewportHeight)}px`);
+}
+
+function bindViewportEvents(viewport) {
+  if (!viewport || viewport.dataset.boundScroll === "true") {
+    return;
+  }
+
+  viewport.dataset.boundScroll = "true";
+  viewport.addEventListener(
+    "scroll",
+    () => {
+      scheduleViewportStateSync(viewport);
+    },
+    { passive: true }
+  );
+}
+
+function scheduleViewportStateSync(viewport) {
+  scheduledViewport = viewport;
+  if (viewportStateFrame) {
+    return;
+  }
+
+  viewportStateFrame = window.requestAnimationFrame(() => {
+    viewportStateFrame = 0;
+    const activeViewport = scheduledViewport;
+    scheduledViewport = null;
+    if (!activeViewport) {
+      return;
+    }
+    state.viewportScrollLeft = activeViewport.scrollLeft;
+    syncViewportStateFromDom(activeViewport);
+    updateNavState(activeViewport);
+  });
+}
+
+function syncViewportStateFromDom(viewport = app.querySelector(".writing-viewport")) {
+  if (!viewport) {
+    return;
+  }
+
+  state.viewportScrollLeft = viewport.scrollLeft;
+  const items = [...viewport.querySelectorAll(".writing-item[data-box-index]")];
+  const leadingEdge = viewport.scrollLeft + 1;
+  const firstVisibleIndex = items.findIndex((item) => item.offsetLeft + item.offsetWidth > leadingEdge);
+
+  if (firstVisibleIndex >= 0) {
+    state.viewportStartIndex = firstVisibleIndex;
+  }
+}
+
+function updateNavState(viewport = app.querySelector(".writing-viewport")) {
+  const prevButton = app.querySelector('[data-action="nav-prev"]');
+  const nextButton = app.querySelector('[data-action="nav-next"]');
+
+  if (!viewport || !prevButton || !nextButton) {
+    return;
+  }
+
+  const navState = getScrollNavState({
+    scrollLeft: viewport.scrollLeft,
+    clientWidth: viewport.clientWidth,
+    scrollWidth: viewport.scrollWidth,
+  });
+  const isInteractive = state.screen === "input";
+  viewport.classList.toggle("is-centered", !navState.canScroll);
+  viewport.classList.toggle("is-scrollable", navState.canScroll);
+
+  prevButton.disabled = !isInteractive || navState.prevDisabled;
+  nextButton.disabled = !isInteractive || navState.nextDisabled;
+}
+
+function getViewportScrollTarget(viewport, step) {
+  const items = [...viewport.querySelectorAll(".writing-item[data-box-index]")];
+  if (!items.length) {
+    return viewport.scrollLeft;
+  }
+
+  const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+  const leadingEdge = viewport.scrollLeft + 1;
+  const firstVisibleIndex = items.findIndex((item) => item.offsetLeft + item.offsetWidth > leadingEdge);
+  const safeStartIndex = firstVisibleIndex >= 0 ? firstVisibleIndex : 0;
+  const targetIndex = clamp(safeStartIndex + step, 0, items.length - 1);
+
+  return getSafeViewportTarget(viewport, items[targetIndex], maxScrollLeft);
+}
+
+function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)) {
+  const safeLeft = readCssPixelValue("--writing-safe-left", 48);
+  const safeRight = readCssPixelValue("--writing-safe-right", 128);
+  const surfaceShell = targetBox.querySelector(".writing-item__surface-shell");
+  const paperBox = targetBox.querySelector(".paper-box");
+  const detectedPill = targetBox.querySelector(".detected-pill");
+  const shellLeft = surfaceShell ? targetBox.offsetLeft + surfaceShell.offsetLeft : targetBox.offsetLeft;
+  const shellRight = surfaceShell
+    ? shellLeft + surfaceShell.offsetWidth
+    : targetBox.offsetLeft + targetBox.offsetWidth;
+  const paperLeft = paperBox ? shellLeft + paperBox.offsetLeft : shellLeft;
+  const paperRight = paperBox ? paperLeft + paperBox.offsetWidth : shellRight;
+  const pillRight = detectedPill
+    ? targetBox.offsetLeft + detectedPill.offsetLeft + detectedPill.offsetWidth
+    : shellRight;
+  const boxLeft = Math.min(targetBox.offsetLeft, shellLeft);
+  const boxRight = Math.max(shellRight, pillRight);
+  const boxWidth = boxRight - boxLeft;
+  const safeWidth = Math.max(1, viewport.clientWidth - safeLeft - safeRight);
+
+  let nextLeft = boxLeft - safeLeft - Math.max(0, (safeWidth - boxWidth) * 0.5);
+
+  const visibleLeft = boxLeft - nextLeft;
+  const visibleRight = boxRight - nextLeft;
+
+  if (visibleLeft < safeLeft) {
+    nextLeft = boxLeft - safeLeft;
+  }
+
+  if (visibleRight > viewport.clientWidth - safeRight) {
+    nextLeft = boxRight - (viewport.clientWidth - safeRight);
+  }
+
+  return clamp(nextLeft, 0, maxScrollLeft);
+}
+
+function readCssPixelValue(propertyName, fallback) {
+  const rawValue = getComputedStyle(document.documentElement).getPropertyValue(propertyName).trim();
+  const parsed = Number.parseFloat(rawValue);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getMockDetectedValue(answerChar, boxIndex) {
+  if (answerChar && answerChar !== " ") {
+    return answerChar;
+  }
+
+  return MOCK_DETECTED_CHARS[boxIndex % MOCK_DETECTED_CHARS.length];
+}
+
+function drawStrokes(context, width, height, strokes, lineColor, lineWidth) {
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.strokeStyle = lineColor;
+  context.fillStyle = lineColor;
+  context.lineWidth = lineWidth;
+
+  strokes.forEach((stroke) => {
+    if (!stroke.points.length) {
+      return;
+    }
+
+    if (stroke.points.length === 1) {
+      const point = stroke.points[0];
+      context.beginPath();
+      context.arc(point.x * width, point.y * height, lineWidth * 0.5, 0, Math.PI * 2);
+      context.fill();
+      return;
+    }
+
+    context.beginPath();
+    stroke.points.forEach((point, index) => {
+      const x = point.x * width;
+      const y = point.y * height;
+      if (index === 0) {
+        context.moveTo(x, y);
+      } else {
+        context.lineTo(x, y);
+      }
+    });
+    context.stroke();
+  });
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
