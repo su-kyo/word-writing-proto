@@ -1,9 +1,9 @@
 const QUESTION_TEXTS = [
+  "우리는 모두 소중한 존재야!",
   "높임 표현",
   "설레는 마음",
   "도움을 주는 까닭",
   "깨닫거나 다짐한 점을 쓴다.",
-  "우리는 모두 소중한 존재야!",
 ];
 
 const PARROT_IMAGES = {
@@ -26,24 +26,21 @@ const {
 } = window.HandwritingViewport;
 
 const LIFE_ICON_SRC = "source/ico-life.svg";
+const CORRECT_BADGE_SRC = "source/correct.png";
+const PEN_ICON_BLACK_SRC = "source/ico-pen-black.svg";
+const PEN_ICON_WHITE_SRC = "source/ico-pen-white.svg";
+const ERASER_ICON_BLACK_SRC = "source/ico-eraser-black.svg";
+const ERASER_ICON_WHITE_SRC = "source/ico-eraser-white.svg";
 const MOCK_DETECTED_CHARS = ["가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타"];
 const TTS_DURATION_MS = 3000;
 const WRONG_FEEDBACK_MS = 1500;
 const CORRECT_HOLD_MS = 2000;
+const ERASER_HIT_RADIUS_PX = 20;
 const app = document.getElementById("app");
 let currentScreenEnterClass = "";
 let lastRenderedScreen = null;
 let viewportStateFrame = 0;
 let scheduledViewport = null;
-
-const ERASER_ICON = `
-  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-    <path
-      d="M21.41 11.58 12.42 2.59a2 2 0 0 0-2.83 0L2.59 9.59a2 2 0 0 0 0 2.83l6.99 6.99A2 2 0 0 0 11 20h8a1 1 0 1 0 0-2h-4.59l6-5.99a2 2 0 0 0 0-2.83ZM11 18l-7-7 7-7 7 7-7 7Z"
-      fill="currentColor"
-    />
-  </svg>
-`;
 
 const state = {
   screen: "idle",
@@ -51,6 +48,7 @@ const state = {
   currentQuestionIndex: 0,
   attemptsLeft: 3,
   activeLetterIndex: null,
+  drawingMode: "pen",
   viewportStartIndex: 0,
   debugNextSubmit: null,
   isDebugOpen: false,
@@ -89,6 +87,7 @@ function resetLessonState() {
   state.currentQuestionIndex = 0;
   state.attemptsLeft = 3;
   state.activeLetterIndex = null;
+  state.drawingMode = "pen";
   state.viewportStartIndex = 0;
   state.debugNextSubmit = null;
   state.isDebugOpen = false;
@@ -101,6 +100,7 @@ function resetCurrentQuestionProgress() {
   const question = getCurrentQuestion();
   state.currentBoxes = createEmptyBoxes(question.chars);
   state.activeLetterIndex = null;
+  state.drawingMode = "pen";
   state.viewportStartIndex = 0;
   state.viewportScrollLeft = 0;
   state.pendingViewportTarget = null;
@@ -146,7 +146,7 @@ function handleAppClick(event) {
     state.screen === "input" &&
     state.activeLetterIndex !== null &&
     !event.target.closest(".paper-box") &&
-    !event.target.closest(".writing-item__erase") &&
+    !event.target.closest(".writing-mode-switch") &&
     !event.target.closest("[data-action]") &&
     !event.target.closest(".writing-viewport")
   ) {
@@ -207,9 +207,14 @@ function handleAppClick(event) {
     case "clear-all":
       clearAllBoxes();
       break;
-    case "erase-active":
-      eraseBox(state.activeLetterIndex);
+    case "set-drawing-mode": {
+      const mode = actionButton.dataset.mode;
+      if (mode === "pen" || mode === "eraser") {
+        state.drawingMode = mode;
+        render();
+      }
       break;
+    }
     case "submit-answer":
       submitCurrentAnswer();
       break;
@@ -266,6 +271,11 @@ function handleAppPointerDown(event) {
     return;
   }
 
+  if (state.drawingMode === "eraser") {
+    beginErase(event, boxIndex, canvas);
+    return;
+  }
+
   beginStroke(event, boxIndex, canvas);
 }
 
@@ -284,6 +294,7 @@ function beginStroke(event, boxIndex, canvas) {
     boxIndex,
     canvas,
     stroke,
+    mode: "pen",
   };
 
   if (typeof canvas.setPointerCapture === "function") {
@@ -296,6 +307,27 @@ function beginStroke(event, boxIndex, canvas) {
   redrawCanvasesForBox(boxIndex);
 }
 
+function beginErase(event, boxIndex, canvas) {
+  event.preventDefault();
+
+  state.pointerSession = {
+    pointerId: event.pointerId,
+    boxIndex,
+    canvas,
+    mode: "eraser",
+  };
+
+  if (typeof canvas.setPointerCapture === "function") {
+    canvas.setPointerCapture(event.pointerId);
+  }
+
+  eraseStrokesNearPoint(boxIndex, canvas, getNormalizedPoint(event, canvas));
+
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", handlePointerUp);
+  window.addEventListener("pointercancel", handlePointerUp);
+}
+
 function handlePointerMove(event) {
   const session = state.pointerSession;
   if (!session || event.pointerId !== session.pointerId) {
@@ -303,6 +335,11 @@ function handlePointerMove(event) {
   }
 
   event.preventDefault();
+
+  if (session.mode === "eraser") {
+    eraseStrokesNearPoint(session.boxIndex, session.canvas, getNormalizedPoint(event, session.canvas));
+    return;
+  }
 
   const point = getNormalizedPoint(event, session.canvas);
   const lastPoint = session.stroke.points[session.stroke.points.length - 1];
@@ -336,10 +373,14 @@ function handlePointerUp(event) {
     }
   }
 
-  box.detected = hasStroke(box) ? getMockDetectedValue(answerChar, session.boxIndex) : "";
+  if (session.mode === "pen") {
+    box.detected = hasStroke(box) ? getMockDetectedValue(answerChar, session.boxIndex) : "";
+    redrawCanvasesForBox(session.boxIndex);
+    refreshDetectedPill(session.boxIndex);
+    refreshInputButtons();
+  }
 
   stopPointerSession();
-  render();
 }
 
 function beginViewportDrag(event, viewport) {
@@ -448,6 +489,7 @@ function enterInputPhase(preserveWriting) {
   state.disableInputEnterAnimation = preserveWriting;
   state.pendingViewportTarget = null;
   state.lastScrollIntent = null;
+  state.drawingMode = "pen";
   if (!preserveWriting) {
     resetCurrentQuestionProgress();
   }
@@ -588,16 +630,37 @@ function ensureActiveBoxVisible(options = {}) {
   }
 }
 
-function eraseBox(boxIndex) {
+function eraseStrokesNearPoint(boxIndex, canvas, point) {
   const box = state.currentBoxes[boxIndex];
   if (!box) {
     return;
   }
 
-  box.strokes = [];
-  box.detected = "";
+  const rect = canvas.getBoundingClientRect();
+  const threshold = ERASER_HIT_RADIUS_PX / Math.max(1, Math.min(rect.width, rect.height));
+  const thresholdSquared = threshold * threshold;
+
+  const nextStrokes = box.strokes.filter(
+    (stroke) =>
+      !stroke.points.some((strokePoint) => {
+        const deltaX = strokePoint.x - point.x;
+        const deltaY = strokePoint.y - point.y;
+        return deltaX * deltaX + deltaY * deltaY <= thresholdSquared;
+      })
+  );
+
+  if (nextStrokes.length === box.strokes.length) {
+    return;
+  }
+
+  box.strokes = nextStrokes;
+  if (!hasStroke(box)) {
+    box.detected = "";
+  }
+
   redrawCanvasesForBox(boxIndex);
-  render();
+  refreshDetectedPill(boxIndex);
+  refreshInputButtons();
 }
 
 function clearAllBoxes() {
@@ -606,6 +669,7 @@ function clearAllBoxes() {
     box.detected = "";
   });
   state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+  state.drawingMode = "pen";
   ensureActiveBoxVisible({ behavior: "auto" });
   render();
 }
@@ -906,7 +970,7 @@ function renderInputScreen() {
               답안 제출
             </button>
             <button class="clear-all-button" data-action="clear-all" ${hasAnyWriting() && !isWrongFeedback ? "" : "disabled"}>
-              <span class="icon icon--eraser">${ERASER_ICON}</span>
+              <img class="toolbar-icon" src="${ERASER_ICON_WHITE_SRC}" alt="" />
               <span>전체 지우기</span>
             </button>
           </div>
@@ -933,9 +997,7 @@ function renderWritingBox(index, isWrongFeedback) {
           ${
             isActive
               ? `
-                <button class="writing-item__erase" data-action="erase-active" aria-label="현재 칸 지우기" ${state.screen === "input" ? "" : "disabled"}>
-                  <span class="icon icon--eraser">${ERASER_ICON}</span>
-                </button>
+                ${renderDrawingModeSwitch()}
               `
               : ""
           }
@@ -943,6 +1005,19 @@ function renderWritingBox(index, isWrongFeedback) {
       </div>
       <div class="detected-pill${detectedText ? "" : " is-empty"}">${escapeHtml(detectedText)}</div>
     </article>
+  `;
+}
+
+function renderDrawingModeSwitch() {
+  return `
+    <div class="writing-mode-switch" role="group" aria-label="펜과 지우개 전환">
+      <button class="writing-mode-switch__button${state.drawingMode === "pen" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="pen" aria-label="펜 모드">
+        <img src="${state.drawingMode === "pen" ? PEN_ICON_BLACK_SRC : PEN_ICON_WHITE_SRC}" alt="" />
+      </button>
+      <button class="writing-mode-switch__button${state.drawingMode === "eraser" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="eraser" aria-label="지우개 모드">
+        <img src="${state.drawingMode === "eraser" ? ERASER_ICON_BLACK_SRC : ERASER_ICON_WHITE_SRC}" alt="" />
+      </button>
+    </div>
   `;
 }
 
@@ -1041,11 +1116,15 @@ function renderRevealScreen() {
 function renderRevealRow(question, attempt, attemptIndex) {
   return `
     <div class="answer-row${attempt.isCorrect ? " is-correct" : ""}">
-      <div class="answer-row__label">${attempt.submissionOrder}차</div>
+      <div class="answer-row__label${attempt.isCorrect ? " has-badge" : ""}">
+        <span class="answer-row__label-text">${attempt.submissionOrder}차</span>
+        ${attempt.isCorrect ? `<img class="answer-row__badge" src="${CORRECT_BADGE_SRC}" alt="정답" />` : ""}
+      </div>
       <div class="answer-row__boxes">
         ${question.chars
-          .map(
-            (char, boxIndex) => `
+          .map((char, boxIndex) => {
+            const isCorrectCell = isAttemptCellCorrect(attempt, question.chars, boxIndex);
+            return `
               <div class="attempt-box${char === " " ? " attempt-box--empty" : ""}">
                 <div class="attempt-box__paper"></div>
                 ${state.showGhostOverlay && char !== " " ? `<span class="attempt-box__ghost">${escapeHtml(char)}</span>` : ""}
@@ -1056,10 +1135,11 @@ function renderRevealRow(question, attempt, attemptIndex) {
                   data-attempt-index="${attemptIndex}"
                   data-box-index="${boxIndex}"
                   data-theme="reveal"
+                  data-line-color="${isCorrectCell ? "#ffffff" : "#ff5b5b"}"
                 ></canvas>
               </div>
-            `
-          )
+            `;
+          })
           .join("")}
       </div>
     </div>
@@ -1084,6 +1164,18 @@ function renderCorrectAnswerRow(question) {
       </div>
     </div>
   `;
+}
+
+function isAttemptCellCorrect(attempt, answerChars, boxIndex) {
+  return getAttemptDetectedChar(attempt, answerChars[boxIndex], boxIndex) === answerChars[boxIndex];
+}
+
+function getAttemptDetectedChar(attempt, answerChar, boxIndex) {
+  const detectedChar = attempt.detectedByIndex?.[boxIndex] ?? "";
+  if (!detectedChar && answerChar === " ") {
+    return " ";
+  }
+  return detectedChar;
 }
 
 function renderResultScreen() {
@@ -1150,6 +1242,31 @@ function redrawCanvasesForBox(boxIndex) {
   canvases.forEach((canvas) => drawCanvas(canvas));
 }
 
+function refreshDetectedPill(boxIndex) {
+  const pill = app.querySelector(`.writing-item[data-box-index="${boxIndex}"] .detected-pill`);
+  const detectedText = state.currentBoxes[boxIndex]?.detected || "";
+  if (!pill) {
+    return;
+  }
+
+  pill.textContent = detectedText;
+  pill.classList.toggle("is-empty", !detectedText);
+}
+
+function refreshInputButtons() {
+  const submitButton = app.querySelector('[data-action="submit-answer"]');
+  const clearButton = app.querySelector('[data-action="clear-all"]');
+  const isInteractive = state.screen === "input";
+
+  if (submitButton) {
+    submitButton.disabled = !isInteractive || !canSubmitCurrentAnswer();
+  }
+
+  if (clearButton) {
+    clearButton.disabled = !isInteractive || !hasAnyWriting();
+  }
+}
+
 function drawCanvas(canvas) {
   const size = resizeCanvasIfNeeded(canvas);
   if (!size) {
@@ -1161,8 +1278,12 @@ function drawCanvas(canvas) {
   context.clearRect(0, 0, size.width, size.height);
 
   const strokes = resolveCanvasStrokes(canvas);
-  const lineColor = resolveLineColor(canvas.dataset.theme);
-  const lineWidth = resolveLineWidth(canvas.dataset.theme, size.width);
+  const lineTheme = {
+    name: canvas.dataset.theme,
+    overrideColor: canvas.dataset.lineColor || "",
+  };
+  const lineColor = resolveLineColor(lineTheme);
+  const lineWidth = resolveLineWidth(lineTheme, size.width);
   drawStrokes(context, size.width, size.height, strokes, lineColor, lineWidth);
 }
 
@@ -1213,7 +1334,13 @@ function resolveCanvasStrokes(canvas) {
 }
 
 function resolveLineColor(theme) {
-  switch (theme) {
+  const themeName = typeof theme === "object" ? theme.name : theme;
+  const overrideColor = typeof theme === "object" ? theme.overrideColor : "";
+  if (overrideColor) {
+    return overrideColor;
+  }
+
+  switch (themeName) {
     case "preview":
     case "waiting-preview":
       return "#1b2036";
@@ -1230,12 +1357,13 @@ function resolveLineColor(theme) {
 }
 
 function resolveLineWidth(theme, rectWidth) {
+  const themeName = typeof theme === "object" ? theme.name : theme;
   if (
-    theme === "preview" ||
-    theme === "waiting-preview" ||
-    theme === "reveal" ||
-    theme === "result-correct" ||
-    theme === "result-wrong"
+    themeName === "preview" ||
+    themeName === "waiting-preview" ||
+    themeName === "reveal" ||
+    themeName === "result-correct" ||
+    themeName === "result-wrong"
   ) {
     return Math.max(1.4, rectWidth * 0.09);
   }

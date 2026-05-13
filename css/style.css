@@ -165,7 +165,7 @@ img {
 .debug-button:hover,
 .clear-all-button:hover,
 .cta-button:hover,
-.writing-item__erase:hover {
+.writing-mode-switch__button:hover {
   filter: brightness(1.06);
 }
 
@@ -512,7 +512,29 @@ img {
 }
 
 .guide-grid--preview {
-  opacity: 0.72;
+  opacity: 0.9;
+}
+
+.preview-box .guide-grid--preview,
+.result-letter-box .guide-grid--result {
+  background-image:
+    linear-gradient(
+      to right,
+      transparent 49.25%,
+      var(--color-guide-strong) 49.25%,
+      var(--color-guide-strong) 50.75%,
+      transparent 50.75%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 49.25%,
+      var(--color-guide-strong) 49.25%,
+      var(--color-guide-strong) 50.75%,
+      transparent 50.75%
+    );
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 
 .letter-canvas--preview {
@@ -586,7 +608,6 @@ img {
   --surface-size: var(--box-small);
   --surface-radius: 24px;
   --surface-shell-pad-top: 0px;
-  --surface-shell-pad-right: 0px;
   position: relative;
   flex: 0 0 auto;
   height: 100%;
@@ -603,9 +624,7 @@ img {
   --surface-size: var(--box-large);
   --surface-radius: 40px;
   --surface-shell-pad-top: 24px;
-  --surface-shell-pad-right: 24px;
   z-index: 2;
-  margin-right: calc(-1 * var(--surface-shell-pad-right));
 }
 
 .writing-item__surface-shell {
@@ -613,7 +632,6 @@ img {
   flex: 0 0 auto;
   overflow: visible;
   padding-top: var(--surface-shell-pad-top);
-  padding-right: var(--surface-shell-pad-right);
   transition: padding 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -662,36 +680,27 @@ img {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(
-      to right,
-      transparent 24.5%,
-      var(--color-guide) 24.5%,
-      var(--color-guide) 25.5%,
-      transparent 25.5%,
-      transparent 49.5%,
-      var(--color-guide-strong) 49.5%,
-      var(--color-guide-strong) 50.5%,
-      transparent 50.5%,
-      transparent 74.5%,
-      var(--color-guide) 74.5%,
-      var(--color-guide) 75.5%,
-      transparent 75.5%
-    ),
-    linear-gradient(
-      to bottom,
-      transparent 24.5%,
-      var(--color-guide) 24.5%,
-      var(--color-guide) 25.5%,
-      transparent 25.5%,
-      transparent 49.5%,
-      var(--color-guide-strong) 49.5%,
-      var(--color-guide-strong) 50.5%,
-      transparent 50.5%,
-      transparent 74.5%,
-      var(--color-guide) 74.5%,
-      var(--color-guide) 75.5%,
-      transparent 75.5%
-    );
+    repeating-linear-gradient(to bottom, var(--color-guide) 0 5px, transparent 5px 10px),
+    repeating-linear-gradient(to bottom, var(--color-guide-strong) 0 5px, transparent 5px 10px),
+    repeating-linear-gradient(to bottom, var(--color-guide) 0 5px, transparent 5px 10px),
+    repeating-linear-gradient(to right, var(--color-guide) 0 5px, transparent 5px 10px),
+    repeating-linear-gradient(to right, var(--color-guide-strong) 0 5px, transparent 5px 10px),
+    repeating-linear-gradient(to right, var(--color-guide) 0 5px, transparent 5px 10px);
+  background-size:
+    1px 100%,
+    1.2px 100%,
+    1px 100%,
+    100% 1px,
+    100% 1.2px,
+    100% 1px;
+  background-position:
+    25% 0,
+    50% 0,
+    75% 0,
+    0 25%,
+    0 50%,
+    0 75%;
+  background-repeat: no-repeat;
   pointer-events: none;
 }
 
@@ -708,34 +717,40 @@ img {
   transform: translateZ(0);
 }
 
-.writing-item__erase {
+.writing-mode-switch {
   position: absolute;
+  left: 50%;
   top: 0;
-  right: 0;
   z-index: 10;
-  width: 64px;
-  height: 64px;
-  border-radius: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 999px;
   background: var(--color-blue);
-  color: var(--color-white);
   box-shadow: 0 14px 24px rgba(0, 54, 122, 0.26);
-  transform: translate(34%, -34%);
+  transform: translate(-50%, -52%);
 }
 
-.icon {
+.writing-mode-switch__button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 56px;
+  height: 32px;
+  border-radius: 999px;
+  background: transparent;
 }
 
-.icon--eraser svg {
-  width: 26px;
-  height: 26px;
+.writing-mode-switch__button.is-active {
+  background: #d6ff58;
 }
 
-.writing-item__erase .icon--eraser svg {
-  width: 34px;
-  height: 34px;
+.writing-mode-switch__button img,
+.toolbar-icon {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
 }
 
 .detected-pill {
@@ -1042,10 +1057,33 @@ img {
 .result-row__label {
   display: grid;
   place-items: center;
+  position: relative;
   background: rgba(255, 255, 255, 0.03);
   color: rgba(255, 255, 255, 0.92);
   font-size: 0.875rem;
   font-weight: 500;
+}
+
+.answer-row__label-text {
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+.answer-row__label.has-badge .answer-row__label-text {
+  opacity: 1;
+}
+
+.answer-row__badge {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  transform: translate(-50%, -50%);
+  opacity: 0.92;
+  z-index: 0;
 }
 
 .answer-row__boxes,
@@ -1285,7 +1323,7 @@ img {
 }
 
 .guide-grid--result {
-  opacity: 0.68;
+  opacity: 0.9;
 }
 
 .result-letter-box__canvas {
@@ -1371,12 +1409,6 @@ img {
 
   .writing-item.is-active {
     --surface-shell-pad-top: 22px;
-    --surface-shell-pad-right: 22px;
-  }
-
-  .writing-item__erase {
-    width: 58px;
-    height: 58px;
   }
 
   .answer-bubble__body {
@@ -1437,12 +1469,6 @@ img {
 
   .writing-item.is-active {
     --surface-shell-pad-top: 20px;
-    --surface-shell-pad-right: 20px;
-  }
-
-  .writing-item__erase {
-    width: 54px;
-    height: 54px;
   }
 
   .nav-rail {
@@ -1505,17 +1531,6 @@ img {
 
   .writing-item.is-active {
     --surface-shell-pad-top: 18px;
-    --surface-shell-pad-right: 18px;
-  }
-
-  .writing-item__erase {
-    width: 52px;
-    height: 52px;
-  }
-
-  .writing-item__erase .icon--eraser svg {
-    width: 28px;
-    height: 28px;
   }
 
   .button-area--input {
