@@ -9,6 +9,8 @@ const {
   ensureActiveBoxVisibleState,
   getScrollNavState,
   createEmptyBoxes,
+  getInitialActiveLetterIndex,
+  shouldShowInputActiveState,
   VISIBLE_BOX_COUNT,
 } = require("../js/viewport.js");
 
@@ -103,4 +105,17 @@ test("getScrollNavState disables next only at the real scroll end", () => {
 
   assert.equal(navState.prevDisabled, false);
   assert.equal(navState.nextDisabled, true);
+});
+
+test("version defaults keep v1 focused and v2 unfocused on input entry", () => {
+  assert.equal(getInitialActiveLetterIndex("v1", 5), 0);
+  assert.equal(getInitialActiveLetterIndex("v2", 5), null);
+  assert.equal(getInitialActiveLetterIndex("v3", 5), 0);
+  assert.equal(getInitialActiveLetterIndex("v1", 0), null);
+});
+
+test("version flags allow blue active preview in all handwriting versions", () => {
+  assert.equal(shouldShowInputActiveState("v1"), true);
+  assert.equal(shouldShowInputActiveState("v2"), true);
+  assert.equal(shouldShowInputActiveState("v3"), true);
 });

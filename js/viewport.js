@@ -21,6 +21,18 @@
     }));
   }
 
+  function getInitialActiveLetterIndex(version, totalChars) {
+    if (!totalChars) {
+      return null;
+    }
+
+    return version === "v2" ? null : 0;
+  }
+
+  function shouldShowInputActiveState(version) {
+    return version === "v1" || version === "v2" || version === "v3";
+  }
+
   function getMaxViewportStart(totalChars, visibleCount = VISIBLE_BOX_COUNT) {
     return Math.max(0, totalChars - visibleCount);
   }
@@ -88,6 +100,8 @@
     clamp,
     createQuestion,
     createEmptyBoxes,
+    getInitialActiveLetterIndex,
+    shouldShowInputActiveState,
     getMaxViewportStart,
     getVisibleEndIndex,
     getVisibleIndices,

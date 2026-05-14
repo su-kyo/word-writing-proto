@@ -20,9 +20,11 @@ const {
   clamp,
   createQuestion,
   createEmptyBoxes,
+  getInitialActiveLetterIndex,
   moveViewportState,
   ensureActiveBoxVisibleState,
   getScrollNavState,
+  shouldShowInputActiveState,
 } = window.HandwritingViewport;
 
 const LIFE_ICON_SRC = "source/ico-life.svg";
@@ -31,6 +33,7 @@ const PEN_ICON_BLACK_SRC = "source/ico-pen-black.svg";
 const PEN_ICON_WHITE_SRC = "source/ico-pen-white.svg";
 const ERASER_ICON_BLACK_SRC = "source/ico-eraser-black.svg";
 const ERASER_ICON_WHITE_SRC = "source/ico-eraser-white.svg";
+const TRASHCAN_ICON_BLACK_SRC = "source/ico-trashcan-black.svg";
 const MOCK_DETECTED_CHARS = ["가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타"];
 const TTS_DURATION_MS = 3000;
 const WRONG_FEEDBACK_MS = 1500;
@@ -41,18 +44,21 @@ let currentScreenEnterClass = "";
 let lastRenderedScreen = null;
 let viewportStateFrame = 0;
 let scheduledViewport = null;
+let viewportScrollAnimationFrame = 0;
 
 const state = {
-  screen: "idle",
+  screen: "versionSelect",
   parrotMood: "idle",
+  handwritingVersion: null,
   currentQuestionIndex: 0,
   attemptsLeft: 3,
   activeLetterIndex: null,
-  drawingMode: "pen",
+  toolMode: "pen",
   viewportStartIndex: 0,
   debugNextSubmit: null,
   isDebugOpen: false,
   showGhostOverlay: false,
+  isClearConfirmOpen: false,
   questions: QUESTION_TEXTS.map(createQuestion),
   currentBoxes: [],
   pointerSession: null,
@@ -82,16 +88,18 @@ function init() {
 function resetLessonState() {
   clearTimers();
   stopPointerSession();
-  state.screen = "idle";
+  state.screen = "versionSelect";
   state.parrotMood = "idle";
+  state.handwritingVersion = null;
   state.currentQuestionIndex = 0;
   state.attemptsLeft = 3;
   state.activeLetterIndex = null;
-  state.drawingMode = "pen";
+  state.toolMode = "pen";
   state.viewportStartIndex = 0;
   state.debugNextSubmit = null;
   state.isDebugOpen = false;
   state.showGhostOverlay = false;
+  state.isClearConfirmOpen = false;
   state.questions = QUESTION_TEXTS.map(createQuestion);
   resetCurrentQuestionProgress();
 }
@@ -99,12 +107,40 @@ function resetLessonState() {
 function resetCurrentQuestionProgress() {
   const question = getCurrentQuestion();
   state.currentBoxes = createEmptyBoxes(question.chars);
-  state.activeLetterIndex = null;
-  state.drawingMode = "pen";
+  state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, question.chars.length);
+  state.toolMode = "pen";
   state.viewportStartIndex = 0;
   state.viewportScrollLeft = 0;
   state.pendingViewportTarget = null;
   state.inputActivatedAt = 0;
+}
+
+function isVersion2() {
+  return state.handwritingVersion === "v2";
+}
+
+function isVersion3() {
+  return state.handwritingVersion === "v3";
+}
+
+function isVersion1() {
+  return state.handwritingVersion === "v1";
+}
+
+function usesFocusedWriting() {
+  return isVersion1() || isVersion3();
+}
+
+function getVersionDescription() {
+  switch (state.handwritingVersion) {
+    case "v2":
+      return "버전 2 · 모든 칸 바로쓰기형";
+    case "v3":
+      return "버전 3 · 확대형 + 오른쪽 도구";
+    case "v1":
+    default:
+      return "버전 1 · 현재 칸 확대형";
+  }
 }
 
 function getCurrentQuestion() {
@@ -137,16 +173,29 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (state.isClearConfirmOpen) {
+    state.isClearConfirmOpen = false;
+    render();
+    return;
+  }
+
   state.isDebugOpen = !state.isDebugOpen;
   render();
 }
 
 function handleAppClick(event) {
+  if (state.isClearConfirmOpen && event.target.closest(".overlay-modal__card") && !event.target.closest("[data-action]")) {
+    return;
+  }
+
   if (
     state.screen === "input" &&
+    usesFocusedWriting() &&
     state.activeLetterIndex !== null &&
     !event.target.closest(".paper-box") &&
     !event.target.closest(".writing-mode-switch") &&
+    !event.target.closest(".tool-dock") &&
+    !event.target.closest(".preview-box") &&
     !event.target.closest("[data-action]") &&
     !event.target.closest(".writing-viewport")
   ) {
@@ -171,6 +220,17 @@ function handleAppClick(event) {
     return;
   }
 
+  const previewBox = state.screen === "input" ? event.target.closest(".preview-box[data-preview-index]") : null;
+  if (previewBox) {
+    const previewIndex = Number(previewBox.dataset.previewIndex);
+    if (Number.isFinite(previewIndex)) {
+      state.activeLetterIndex = previewIndex;
+      ensureActiveBoxVisible({ behavior: "smooth" });
+      render();
+      return;
+    }
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (!actionButton) {
     return;
@@ -179,6 +239,15 @@ function handleAppClick(event) {
   const action = actionButton.dataset.action;
 
   switch (action) {
+    case "choose-version": {
+      const version = actionButton.dataset.version === "v2" ? "v2" : actionButton.dataset.version === "v3" ? "v3" : "v1";
+      state.handwritingVersion = version;
+      state.screen = "idle";
+      state.parrotMood = "idle";
+      resetCurrentQuestionProgress();
+      render();
+      break;
+    }
     case "start-tts":
       startTtsPhase();
       break;
@@ -205,12 +274,32 @@ function handleAppClick(event) {
       moveViewport(3);
       break;
     case "clear-all":
+      if (state.screen === "input" && (isVersion2() || isVersion3())) {
+        state.isClearConfirmOpen = true;
+        render();
+      } else {
+        clearAllBoxes();
+      }
+      break;
+    case "cancel-clear-all":
+      state.isClearConfirmOpen = false;
+      render();
+      break;
+    case "confirm-clear-all":
+      state.isClearConfirmOpen = false;
       clearAllBoxes();
       break;
+    case "clear-current-box": {
+      const boxIndex = Number(actionButton.dataset.boxIndex);
+      if (Number.isFinite(boxIndex)) {
+        clearSingleBox(boxIndex);
+      }
+      break;
+    }
     case "set-drawing-mode": {
       const mode = actionButton.dataset.mode;
       if (mode === "pen" || mode === "eraser") {
-        state.drawingMode = mode;
+        state.toolMode = mode;
         render();
       }
       break;
@@ -224,6 +313,10 @@ function handleAppClick(event) {
 }
 
 function handleAppPointerDown(event) {
+  if (state.isClearConfirmOpen) {
+    return;
+  }
+
   if (state.screen !== "input") {
     return;
   }
@@ -255,11 +348,19 @@ function handleAppPointerDown(event) {
     return;
   }
 
-  if (boxIndex !== state.activeLetterIndex) {
+  if (usesFocusedWriting() && boxIndex !== state.activeLetterIndex) {
     state.activeLetterIndex = boxIndex;
-    ensureActiveBoxVisible();
+    ensureActiveBoxVisible({ behavior: "smooth" });
     render();
     return;
+  }
+
+  if (isVersion2()) {
+    const previousIndex = state.activeLetterIndex;
+    state.activeLetterIndex = boxIndex;
+    if (previousIndex !== boxIndex) {
+      refreshV2CurrentBoxState(previousIndex, boxIndex);
+    }
   }
 
   if (!surface) {
@@ -271,7 +372,7 @@ function handleAppPointerDown(event) {
     return;
   }
 
-  if (state.drawingMode === "eraser") {
+  if (state.toolMode === "eraser") {
     beginErase(event, boxIndex, canvas);
     return;
   }
@@ -281,6 +382,7 @@ function handleAppPointerDown(event) {
 
 function beginStroke(event, boxIndex, canvas) {
   event.preventDefault();
+  stopViewportScrollAnimation();
 
   const point = getNormalizedPoint(event, canvas);
   const box = state.currentBoxes[boxIndex];
@@ -309,6 +411,7 @@ function beginStroke(event, boxIndex, canvas) {
 
 function beginErase(event, boxIndex, canvas) {
   event.preventDefault();
+  stopViewportScrollAnimation();
 
   state.pointerSession = {
     pointerId: event.pointerId,
@@ -385,13 +488,14 @@ function handlePointerUp(event) {
 
 function beginViewportDrag(event, viewport) {
   event.preventDefault();
+  stopViewportScrollAnimation();
 
   state.viewportDragSession = {
     pointerId: event.pointerId,
     viewport,
     startClientX: event.clientX,
     startScrollLeft: viewport.scrollLeft,
-    shouldClearFocus: state.activeLetterIndex !== null,
+    shouldClearFocus: usesFocusedWriting() && state.activeLetterIndex !== null,
     didDrag: false,
   };
 
@@ -489,12 +593,18 @@ function enterInputPhase(preserveWriting) {
   state.disableInputEnterAnimation = preserveWriting;
   state.pendingViewportTarget = null;
   state.lastScrollIntent = null;
-  state.drawingMode = "pen";
+  state.toolMode = "pen";
   if (!preserveWriting) {
     resetCurrentQuestionProgress();
+  } else if (usesFocusedWriting()) {
+    state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
   }
-  state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
-  ensureActiveBoxVisible({ behavior: preserveWriting ? "smooth" : "auto", defer: preserveWriting });
+  if (usesFocusedWriting()) {
+    state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
+    ensureActiveBoxVisible({ behavior: preserveWriting ? "smooth" : "auto", defer: preserveWriting });
+  } else {
+    state.activeLetterIndex = preserveWriting ? state.activeLetterIndex : null;
+  }
   state.inputActivatedAt = performance.now();
   render();
 }
@@ -593,10 +703,7 @@ function moveViewport(step) {
 
   const nextScrollLeft = getViewportScrollTarget(viewport, step);
   state.lastScrollIntent = "nav";
-  viewport.scrollTo({ left: nextScrollLeft, top: 0, behavior: "auto" });
-  state.viewportScrollLeft = nextScrollLeft;
-  syncViewportStateFromDom(viewport);
-  updateNavState(viewport);
+  animateViewportScroll(viewport, nextScrollLeft);
 }
 
 function ensureActiveBoxVisible(options = {}) {
@@ -668,10 +775,30 @@ function clearAllBoxes() {
     box.strokes = [];
     box.detected = "";
   });
-  state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
-  state.drawingMode = "pen";
-  ensureActiveBoxVisible({ behavior: "auto" });
+  state.viewportScrollLeft = 0;
+  state.pendingViewportTarget = null;
+  if (usesFocusedWriting()) {
+    state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
+    state.toolMode = "pen";
+    ensureActiveBoxVisible({ behavior: "auto" });
+  } else {
+    state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+    state.toolMode = "pen";
+  }
   render();
+}
+
+function clearSingleBox(boxIndex) {
+  const box = state.currentBoxes[boxIndex];
+  if (!box) {
+    return;
+  }
+
+  box.strokes = [];
+  box.detected = "";
+  redrawCanvasesForBox(boxIndex);
+  refreshDetectedPill(boxIndex);
+  refreshInputButtons();
 }
 
 function submitCurrentAnswer() {
@@ -800,6 +927,7 @@ function render() {
       ${renderDebugPanel()}
       ${renderParrotStage()}
       ${renderScreen()}
+      ${renderDialogs()}
       ${isResult ? '<div class="result-illustration" aria-hidden="true"></div>' : ""}
     </div>
   `;
@@ -821,6 +949,10 @@ function getScreenEnterClass(screen) {
 }
 
 function renderTopPanels() {
+  if (state.screen === "versionSelect") {
+    return "";
+  }
+
   return `
     <aside class="top-panels">
       <section class="control-panel">
@@ -843,7 +975,7 @@ function renderTopPanels() {
 }
 
 function renderDebugPanel() {
-  if (!state.isDebugOpen || state.screen === "result") {
+  if (!state.isDebugOpen || state.screen === "result" || state.screen === "versionSelect") {
     return "";
   }
 
@@ -872,6 +1004,25 @@ function renderDebugPanel() {
   `;
 }
 
+function renderDialogs() {
+  if (!state.isClearConfirmOpen) {
+    return "";
+  }
+
+  return `
+    <div class="overlay-modal" data-action="cancel-clear-all">
+      <section class="overlay-modal__card" role="dialog" aria-modal="true" aria-label="모두 지우기 확인">
+        <p class="overlay-modal__title">글자를 모두 지울까요?</p>
+        <p class="overlay-modal__body">지우면 지금까지 쓴 글자가 모두 사라져요.</p>
+        <div class="overlay-modal__actions">
+          <button class="overlay-modal__button overlay-modal__button--primary" data-action="confirm-clear-all">모두 지우기</button>
+          <button class="overlay-modal__button overlay-modal__button--ghost" data-action="cancel-clear-all">취소</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderParrotStage() {
   if (state.screen === "result") {
     return '<section class="parrot-stage is-hidden" aria-hidden="true"></section>';
@@ -892,6 +1043,8 @@ function renderParrotStage() {
 
 function renderScreen() {
   switch (state.screen) {
+    case "versionSelect":
+      return renderVersionSelectScreen();
     case "idle":
       return renderIdleScreen();
     case "tts":
@@ -912,12 +1065,44 @@ function renderScreen() {
   }
 }
 
+function renderVersionSelectScreen() {
+  return `
+    <main class="screen version-screen">
+      <div class="screen__dim screen__dim--soft"></div>
+      <section class="version-picker screen__content">
+        <p class="version-picker__eyebrow">손글씨 받아쓰기</p>
+        <h1 class="version-picker__title">입력 방식을 선택해주세요</h1>
+        <div class="version-picker__cards">
+          <button class="version-card" data-action="choose-version" data-version="v1">
+            <span class="version-card__kicker">버전 1</span>
+            <strong class="version-card__title">현재 칸 확대형</strong>
+            <span class="version-card__body">한 칸을 선택하면 크게 확대해서 쓰는 방식</span>
+          </button>
+          <button class="version-card" data-action="choose-version" data-version="v2">
+            <span class="version-card__kicker">버전 2</span>
+            <strong class="version-card__title">모든 칸 바로쓰기형</strong>
+            <span class="version-card__body">모든 칸에 바로 쓰고, 도구를 선택해서 쓰기/지우기하는 방식</span>
+          </button>
+          <button class="version-card" data-action="choose-version" data-version="v3">
+            <span class="version-card__kicker">버전 3</span>
+            <strong class="version-card__title">확대형 + 오른쪽 도구</strong>
+            <span class="version-card__body">현재 칸은 크게 쓰고, 도구는 오른쪽 dock에서 바꾸는 방식</span>
+          </button>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
 function renderIdleScreen() {
   return `
     <main class="screen idle-screen">
       <section class="idle-card screen__content">
         <h1 class="idle-card__title">손글씨 받아쓰기 준비 완료</h1>
-        <p class="idle-card__body">오른쪽 상단의 <strong>TTS 재생</strong> 버튼으로 활동을 시작하세요.</p>
+        <p class="idle-card__body">
+          선택한 방식: <strong>${getVersionDescription()}</strong><br />
+          오른쪽 상단의 <strong>TTS 재생</strong> 버튼으로 활동을 시작하세요.
+        </p>
       </section>
     </main>
   `;
@@ -936,6 +1121,18 @@ function renderTtsScreen() {
 }
 
 function renderInputScreen() {
+  if (isVersion2()) {
+    return renderInputScreenV2();
+  }
+
+  if (isVersion3()) {
+    return renderInputScreenV3();
+  }
+
+  return renderInputScreenV1();
+}
+
+function renderInputScreenV1() {
   const question = getCurrentQuestion();
   const isWrongFeedback = state.screen === "wrongFeedback";
 
@@ -958,7 +1155,7 @@ function renderInputScreen() {
             </button>
             <div class="writing-viewport">
               <div class="writing-row${isWrongFeedback ? " is-wrong" : ""}" data-writing-row>
-                ${question.chars.map((_, index) => renderWritingBox(index, isWrongFeedback)).join("")}
+                ${question.chars.map((_, index) => renderWritingBoxV1(index, isWrongFeedback)).join("")}
               </div>
             </div>
             <button class="nav-rail nav-rail--next" data-action="nav-next" aria-label="다음 글자 칸">
@@ -980,11 +1177,100 @@ function renderInputScreen() {
   `;
 }
 
-function renderWritingBox(index, isWrongFeedback) {
+function renderInputScreenV3() {
+  const question = getCurrentQuestion();
+  const isWrongFeedback = state.screen === "wrongFeedback";
+
+  return `
+    <main class="screen input-screen input-screen--v2${currentScreenEnterClass ? ` ${currentScreenEnterClass}` : ""}">
+      <div class="screen__dim screen__dim--flat"></div>
+      <section class="input-shell input-shell--v2 screen__content">
+        <div class="activity-stack activity-stack--v2">
+          <div class="input-head">
+            ${renderLifeRow()}
+          </div>
+          <div class="preview-cluster preview-cluster--input">
+            <div class="preview-row preview-row--input" aria-label="preview letter boxes">
+              ${question.chars.map((char, index) => renderPreviewBox(char, index, "input")).join("")}
+            </div>
+          </div>
+          <div class="writing-zone writing-zone--v2">
+            <section class="writing-panel writing-panel--v3">
+              <button class="nav-rail nav-rail--prev" data-action="nav-prev" aria-label="이전 글자 칸">
+                <span aria-hidden="true">‹</span>
+              </button>
+              <div class="writing-viewport writing-viewport--v3">
+                <div class="writing-row${isWrongFeedback ? " is-wrong" : ""}" data-writing-row>
+                  ${question.chars.map((_, index) => renderWritingBoxV1(index, isWrongFeedback)).join("")}
+                </div>
+              </div>
+              <button class="nav-rail nav-rail--next" data-action="nav-next" aria-label="다음 글자 칸">
+                <span aria-hidden="true">›</span>
+              </button>
+            </section>
+            ${renderToolDock({ isInteractive: !isWrongFeedback, includeClearAll: true })}
+          </div>
+          <div class="button-area button-area--input button-area--input-v2">
+            <button class="cta-button" data-action="submit-answer" ${canSubmitCurrentAnswer() && !isWrongFeedback ? "" : "disabled"}>
+              답안 제출
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function renderInputScreenV2() {
+  const question = getCurrentQuestion();
+  const isWrongFeedback = state.screen === "wrongFeedback";
+
+  return `
+    <main class="screen input-screen input-screen--v2${currentScreenEnterClass ? ` ${currentScreenEnterClass}` : ""}">
+      <div class="screen__dim screen__dim--flat"></div>
+      <section class="input-shell input-shell--v2 screen__content">
+        <div class="activity-stack activity-stack--v2">
+          <div class="input-head">
+            ${renderLifeRow()}
+          </div>
+          <div class="preview-cluster preview-cluster--input">
+            <div class="preview-row preview-row--input" aria-label="preview letter boxes">
+              ${question.chars.map((char, index) => renderPreviewBox(char, index, "input")).join("")}
+            </div>
+          </div>
+          <div class="writing-zone writing-zone--v2">
+            <section class="writing-panel writing-panel--v2">
+              <button class="nav-rail nav-rail--prev" data-action="nav-prev" aria-label="이전 글자 칸">
+                <span aria-hidden="true">‹</span>
+              </button>
+              <div class="writing-viewport writing-viewport--v2">
+                <div class="writing-row writing-row--v2${isWrongFeedback ? " is-wrong" : ""}" data-writing-row>
+                  ${question.chars.map((_, index) => renderWritingBoxV2(index, isWrongFeedback)).join("")}
+                </div>
+              </div>
+              <button class="nav-rail nav-rail--next" data-action="nav-next" aria-label="다음 글자 칸">
+                <span aria-hidden="true">›</span>
+              </button>
+            </section>
+          ${renderToolDock({ isInteractive: !isWrongFeedback, includeClearAll: true })}
+          </div>
+          <div class="button-area button-area--input button-area--input-v2">
+            <button class="cta-button" data-action="submit-answer" ${canSubmitCurrentAnswer() && !isWrongFeedback ? "" : "disabled"}>
+              답안 제출
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
+function renderWritingBoxV1(index, isWrongFeedback) {
   const box = state.currentBoxes[index];
   const isActive = index === state.activeLetterIndex;
-  const isWarning = isWrongFeedback && hasStroke(box);
+  const isWarning = isWrongFeedback;
   const detectedText = box.detected;
+  const showCurrentClear = isVersion3() && isActive && !isWrongFeedback;
 
   return `
     <article class="writing-item${isActive ? " is-active" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
@@ -997,7 +1283,8 @@ function renderWritingBox(index, isWrongFeedback) {
           ${
             isActive
               ? `
-                ${renderDrawingModeSwitch()}
+                ${isVersion1() ? renderDrawingModeSwitch() : ""}
+                ${showCurrentClear ? renderCurrentClearButton(index) : ""}
               `
               : ""
           }
@@ -1008,21 +1295,82 @@ function renderWritingBox(index, isWrongFeedback) {
   `;
 }
 
+function renderWritingBoxV2(index, isWrongFeedback) {
+  const box = state.currentBoxes[index];
+  const isWarning = isWrongFeedback;
+  const isCurrent = index === state.activeLetterIndex;
+  const detectedText = box.detected;
+
+  return `
+    <article class="writing-item writing-item--v2${isCurrent ? " is-current" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
+      <div class="writing-item__surface-shell writing-item__surface-shell--v2">
+        <div class="writing-item__surface writing-item__surface--v2">
+          <div class="paper-box paper-box--v2${isCurrent ? " is-current" : ""}${isWarning ? " is-warning" : ""}">
+            <div class="guide-grid" aria-hidden="true"></div>
+            <canvas class="letter-canvas" data-canvas-role="input" data-box-index="${index}" data-theme="input"></canvas>
+          </div>
+          ${isCurrent && !isWrongFeedback ? renderCurrentClearButton(index) : ""}
+        </div>
+      </div>
+      <div class="detected-pill detected-pill--v2${detectedText ? "" : " is-empty"}">${escapeHtml(detectedText)}</div>
+    </article>
+  `;
+}
+
+function renderCurrentClearButton(index) {
+  return `
+    <button
+      class="writing-item__clear-current"
+      data-action="clear-current-box"
+      data-box-index="${index}"
+      aria-label="현재 칸 모두 지우기"
+      type="button"
+    >
+      <img src="${TRASHCAN_ICON_BLACK_SRC}" alt="" />
+    </button>
+  `;
+}
+
 function renderDrawingModeSwitch() {
   return `
     <div class="writing-mode-switch" role="group" aria-label="펜과 지우개 전환">
-      <button class="writing-mode-switch__button${state.drawingMode === "pen" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="pen" aria-label="펜 모드">
-        <img src="${state.drawingMode === "pen" ? PEN_ICON_BLACK_SRC : PEN_ICON_WHITE_SRC}" alt="" />
+      <button class="writing-mode-switch__button${state.toolMode === "pen" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="pen" aria-label="펜 모드">
+        <img src="${state.toolMode === "pen" ? PEN_ICON_BLACK_SRC : PEN_ICON_WHITE_SRC}" alt="" />
       </button>
-      <button class="writing-mode-switch__button${state.drawingMode === "eraser" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="eraser" aria-label="지우개 모드">
-        <img src="${state.drawingMode === "eraser" ? ERASER_ICON_BLACK_SRC : ERASER_ICON_WHITE_SRC}" alt="" />
+      <button class="writing-mode-switch__button${state.toolMode === "eraser" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="eraser" aria-label="지우개 모드">
+        <img src="${state.toolMode === "eraser" ? ERASER_ICON_BLACK_SRC : ERASER_ICON_WHITE_SRC}" alt="" />
       </button>
     </div>
   `;
 }
 
+function renderToolDock({ isInteractive, includeClearAll }) {
+  return `
+    <div class="tool-dock" aria-label="필기 도구">
+      <button class="tool-dock__button${state.toolMode === "pen" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="pen" aria-label="펜" ${isInteractive ? "" : "disabled"}>
+        <img src="${state.toolMode === "pen" ? PEN_ICON_BLACK_SRC : PEN_ICON_BLACK_SRC}" alt="" />
+      </button>
+      <button class="tool-dock__button${state.toolMode === "eraser" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="eraser" aria-label="지우개" ${isInteractive ? "" : "disabled"}>
+        <img src="${ERASER_ICON_BLACK_SRC}" alt="" />
+      </button>
+      ${
+        includeClearAll
+          ? `
+            <button class="tool-dock__button tool-dock__button--action" data-action="clear-all" aria-label="모두 지우기" ${hasAnyWriting() && isInteractive ? "" : "disabled"}>
+              <img src="${TRASHCAN_ICON_BLACK_SRC}" alt="" />
+            </button>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
 function renderPreviewBox(char, index, context) {
-  const isActive = context === "input" && index === state.activeLetterIndex;
+  const isActive =
+    context === "input" &&
+    shouldShowInputActiveState(state.handwritingVersion) &&
+    index === state.activeLetterIndex;
   const isBlank = char === " ";
   const theme = context === "waiting" ? "waiting-preview" : "preview";
   const role = context === "waiting" ? "waiting-preview" : "preview";
@@ -1249,22 +1597,61 @@ function refreshDetectedPill(boxIndex) {
     return;
   }
 
-  pill.textContent = detectedText;
+  pill.textContent = detectedText || (pill.classList.contains("detected-pill--v2") ? " " : "");
   pill.classList.toggle("is-empty", !detectedText);
 }
 
 function refreshInputButtons() {
   const submitButton = app.querySelector('[data-action="submit-answer"]');
-  const clearButton = app.querySelector('[data-action="clear-all"]');
+  const clearButtons = app.querySelectorAll('[data-action="clear-all"]');
   const isInteractive = state.screen === "input";
 
   if (submitButton) {
     submitButton.disabled = !isInteractive || !canSubmitCurrentAnswer();
   }
 
-  if (clearButton) {
-    clearButton.disabled = !isInteractive || !hasAnyWriting();
+  clearButtons.forEach((button) => {
+    button.disabled = !isInteractive || !hasAnyWriting();
+  });
+}
+
+function refreshV2CurrentBoxState(previousIndex, nextIndex) {
+  if (!isVersion2()) {
+    return;
   }
+
+  const previousItem =
+    previousIndex === null ? null : app.querySelector(`.writing-item--v2[data-box-index="${previousIndex}"]`);
+  const nextItem =
+    nextIndex === null ? null : app.querySelector(`.writing-item--v2[data-box-index="${nextIndex}"]`);
+
+  if (previousItem) {
+    previousItem.classList.remove("is-current");
+    previousItem.querySelector(".paper-box--v2")?.classList.remove("is-current");
+  }
+
+  if (nextItem) {
+    nextItem.classList.add("is-current");
+    nextItem.querySelector(".paper-box--v2")?.classList.add("is-current");
+  }
+
+  const previousPreview =
+    previousIndex === null ? null : app.querySelector(`.preview-box[data-preview-index="${previousIndex}"]`);
+  const nextPreview =
+    nextIndex === null ? null : app.querySelector(`.preview-box[data-preview-index="${nextIndex}"]`);
+
+  previousPreview?.classList.remove("is-active");
+  nextPreview?.classList.add("is-active");
+
+  window.requestAnimationFrame(() => {
+    if (previousIndex !== null) {
+      redrawCanvasesForBox(previousIndex);
+    }
+    if (nextIndex !== null) {
+      redrawCanvasesForBox(nextIndex);
+    }
+    syncWritingViewport();
+  });
 }
 
 function drawCanvas(canvas) {
@@ -1382,20 +1769,17 @@ function syncWritingViewport() {
     const targetBox = app.querySelector(`.writing-item[data-box-index="${pendingTarget.index}"]`);
     if (targetBox) {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      viewport.scrollLeft = clamp(state.viewportScrollLeft, 0, maxScrollLeft);
       const nextLeft =
         pendingTarget.align === "safe-center"
           ? getSafeViewportTarget(viewport, targetBox, maxScrollLeft)
           : clamp(targetBox.offsetLeft - 8, 0, maxScrollLeft);
 
       const applyScroll = () => {
-        viewport.scrollTo({
-          left: clamp(nextLeft, 0, maxScrollLeft),
-          top: 0,
-          behavior: pendingTarget.behavior || "auto",
+        const clampedLeft = clamp(nextLeft, 0, maxScrollLeft);
+        animateViewportScroll(viewport, clampedLeft, {
+          immediate: (pendingTarget.behavior || "auto") === "auto",
         });
-        state.viewportScrollLeft = clamp(nextLeft, 0, maxScrollLeft);
-        syncViewportStateFromDom(viewport);
-        updateNavState(viewport);
       };
 
       if (pendingTarget.defer) {
@@ -1453,6 +1837,61 @@ function scheduleViewportStateSync(viewport) {
     syncViewportStateFromDom(activeViewport);
     updateNavState(activeViewport);
   });
+}
+
+function stopViewportScrollAnimation() {
+  if (!viewportScrollAnimationFrame) {
+    return;
+  }
+
+  window.cancelAnimationFrame(viewportScrollAnimationFrame);
+  viewportScrollAnimationFrame = 0;
+}
+
+function animateViewportScroll(viewport, targetLeft, options = {}) {
+  if (!viewport) {
+    return;
+  }
+
+  stopViewportScrollAnimation();
+
+  const startLeft = viewport.scrollLeft;
+  const clampedLeft = clamp(targetLeft, 0, Math.max(0, viewport.scrollWidth - viewport.clientWidth));
+  const delta = clampedLeft - startLeft;
+
+  if (options.immediate || Math.abs(delta) < 1) {
+    viewport.scrollLeft = clampedLeft;
+    state.viewportScrollLeft = clampedLeft;
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+    return;
+  }
+
+  const duration = Math.min(340, Math.max(180, Math.abs(delta) * 0.35));
+  const startedAt = performance.now();
+
+  const tick = (now) => {
+    const progress = clamp((now - startedAt) / duration, 0, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const nextLeft = startLeft + delta * eased;
+    viewport.scrollLeft = nextLeft;
+    state.viewportScrollLeft = nextLeft;
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+
+    if (progress < 1) {
+      viewportScrollAnimationFrame = window.requestAnimationFrame(tick);
+      return;
+    }
+
+    viewport.scrollLeft = clampedLeft;
+    state.viewportScrollLeft = clampedLeft;
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+    viewportScrollAnimationFrame = 0;
+  };
+
+  viewportScrollAnimationFrame = window.requestAnimationFrame(tick);
 }
 
 function syncViewportStateFromDom(viewport = app.querySelector(".writing-viewport")) {
