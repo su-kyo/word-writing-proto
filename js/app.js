@@ -46,6 +46,7 @@ let lastRenderedScreen = null;
 let viewportStateFrame = 0;
 let scheduledViewport = null;
 let viewportScrollAnimationFrame = 0;
+let writingTransitionFrame = 0;
 
 const state = {
   screen: "versionSelect",
@@ -340,17 +341,7 @@ function handleAppClick(event) {
         if (state.activeLetterIndex === null && getCurrentQuestion().chars.length) {
           state.activeLetterIndex = 0;
         }
-        state.pendingViewportTarget =
-          state.activeLetterIndex === null
-            ? null
-            : {
-                type: "box",
-                index: state.activeLetterIndex,
-                align: "safe-center",
-                behavior: "smooth",
-                defer: true,
-                onlyIfNeeded: true,
-              };
+        state.pendingViewportTarget = null;
         refreshV4WritingModePresentation();
       }
       break;
@@ -1620,17 +1611,24 @@ function refreshWritingSizeToggle() {
   toggle.setAttribute("aria-checked", state.isLargeWritingEnabled ? "true" : "false");
 }
 
-function startWritingTransitionRefresh(duration = 260) {
+function startWritingTransitionRefresh(duration = 260, onFrame = null) {
+  stopWritingTransitionRefresh();
   const startedAt = performance.now();
 
   const tick = (now) => {
     setupCanvases();
-    if (now - startedAt < duration) {
-      window.requestAnimationFrame(tick);
+    if (onFrame) {
+      onFrame(now - startedAt >= duration);
     }
+    if (now - startedAt < duration) {
+      writingTransitionFrame = window.requestAnimationFrame(tick);
+      return;
+    }
+
+    writingTransitionFrame = 0;
   };
 
-  window.requestAnimationFrame(tick);
+  writingTransitionFrame = window.requestAnimationFrame(tick);
 }
 
 function refreshV4WritingModePresentation() {
@@ -1643,6 +1641,18 @@ function refreshV4WritingModePresentation() {
     return;
   }
 
+  const activeIndex = state.activeLetterIndex;
+  const currentPaper =
+    activeIndex === null
+      ? null
+      : row.querySelector(`.writing-item--v4[data-box-index="${activeIndex}"] .paper-box--v4`);
+  const viewportRect = viewport.getBoundingClientRect();
+  const anchorCenter =
+    currentPaper
+      ? currentPaper.getBoundingClientRect().left + currentPaper.getBoundingClientRect().width * 0.5 - viewportRect.left
+      : null;
+  const startScrollLeft = viewport.scrollLeft;
+
   panel.classList.toggle("is-large-mode", state.isLargeWritingEnabled);
   row.querySelectorAll(".writing-item--v4").forEach((item) => {
     item.classList.toggle("is-large-mode", state.isLargeWritingEnabled);
@@ -1651,14 +1661,32 @@ function refreshV4WritingModePresentation() {
   refreshWritingSizeToggle();
   refreshToolModeControls();
   setupCanvases();
-  window.requestAnimationFrame(() => {
-    syncWritingViewport();
-    startWritingTransitionRefresh();
-    window.setTimeout(() => {
-      setupCanvases();
-      syncWritingViewport();
-    }, 280);
-  });
+  const keepActivePaperAnchored = () => {
+    if (activeIndex === null || anchorCenter === null) {
+      syncViewportStateFromDom(viewport);
+      updateNavState(viewport);
+      return;
+    }
+
+    const nextPaper = row.querySelector(`.writing-item--v4[data-box-index="${activeIndex}"] .paper-box--v4`);
+    if (!nextPaper) {
+      syncViewportStateFromDom(viewport);
+      updateNavState(viewport);
+      return;
+    }
+
+    const nextViewportRect = viewport.getBoundingClientRect();
+    const nextRect = nextPaper.getBoundingClientRect();
+    const nextCenter = nextRect.left + nextRect.width * 0.5 - nextViewportRect.left;
+    const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    viewport.scrollLeft = clamp(viewport.scrollLeft + (nextCenter - anchorCenter), 0, maxScrollLeft);
+    state.viewportScrollLeft = viewport.scrollLeft;
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+  };
+
+  keepActivePaperAnchored();
+  startWritingTransitionRefresh(280, keepActivePaperAnchored);
 }
 
 function renderPreviewBox(char, index, context) {
@@ -2077,7 +2105,6 @@ function syncWritingViewport() {
     const targetBox = app.querySelector(`.writing-item[data-box-index="${pendingTarget.index}"]`);
     if (targetBox) {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-      viewport.scrollLeft = clamp(state.viewportScrollLeft, 0, maxScrollLeft);
       if (pendingTarget.onlyIfNeeded && !isBoxOutsideSafeViewport(viewport, targetBox)) {
         state.pendingViewportTarget = null;
         bindViewportEvents(viewport);
@@ -2176,6 +2203,15 @@ function stopViewportScrollAnimation() {
 
   window.cancelAnimationFrame(viewportScrollAnimationFrame);
   viewportScrollAnimationFrame = 0;
+}
+
+function stopWritingTransitionRefresh() {
+  if (!writingTransitionFrame) {
+    return;
+  }
+
+  window.cancelAnimationFrame(writingTransitionFrame);
+  writingTransitionFrame = 0;
 }
 
 function animateViewportScroll(viewport, targetLeft, options = {}) {
