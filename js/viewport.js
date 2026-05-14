@@ -30,7 +30,11 @@
   }
 
   function shouldShowInputActiveState(version) {
-    return version === "v1" || version === "v2" || version === "v3";
+    return version === "v1" || version === "v2" || version === "v3" || version === "v4";
+  }
+
+  function shouldResetToFirstBoxOnRetry(version, isLargeWritingEnabled = false) {
+    return version === "v2" || (version === "v4" && !isLargeWritingEnabled);
   }
 
   function getMaxViewportStart(totalChars, visibleCount = VISIBLE_BOX_COUNT) {
@@ -102,6 +106,7 @@
     createEmptyBoxes,
     getInitialActiveLetterIndex,
     shouldShowInputActiveState,
+    shouldResetToFirstBoxOnRetry,
     getMaxViewportStart,
     getVisibleEndIndex,
     getVisibleIndices,

@@ -11,6 +11,7 @@ const {
   createEmptyBoxes,
   getInitialActiveLetterIndex,
   shouldShowInputActiveState,
+  shouldResetToFirstBoxOnRetry,
   VISIBLE_BOX_COUNT,
 } = require("../js/viewport.js");
 
@@ -107,10 +108,11 @@ test("getScrollNavState disables next only at the real scroll end", () => {
   assert.equal(navState.nextDisabled, true);
 });
 
-test("version defaults keep v1 focused and v2 unfocused on input entry", () => {
+test("version defaults keep focused and direct-writing modes aligned with each version", () => {
   assert.equal(getInitialActiveLetterIndex("v1", 5), 0);
   assert.equal(getInitialActiveLetterIndex("v2", 5), null);
   assert.equal(getInitialActiveLetterIndex("v3", 5), 0);
+  assert.equal(getInitialActiveLetterIndex("v4", 5), 0);
   assert.equal(getInitialActiveLetterIndex("v1", 0), null);
 });
 
@@ -118,4 +120,13 @@ test("version flags allow blue active preview in all handwriting versions", () =
   assert.equal(shouldShowInputActiveState("v1"), true);
   assert.equal(shouldShowInputActiveState("v2"), true);
   assert.equal(shouldShowInputActiveState("v3"), true);
+  assert.equal(shouldShowInputActiveState("v4"), true);
+});
+
+test("retry flow returns direct-writing modes to the first box only", () => {
+  assert.equal(shouldResetToFirstBoxOnRetry("v1", false), false);
+  assert.equal(shouldResetToFirstBoxOnRetry("v2", false), true);
+  assert.equal(shouldResetToFirstBoxOnRetry("v3", false), false);
+  assert.equal(shouldResetToFirstBoxOnRetry("v4", false), true);
+  assert.equal(shouldResetToFirstBoxOnRetry("v4", true), false);
 });

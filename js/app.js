@@ -25,6 +25,7 @@ const {
   ensureActiveBoxVisibleState,
   getScrollNavState,
   shouldShowInputActiveState,
+  shouldResetToFirstBoxOnRetry,
 } = window.HandwritingViewport;
 
 const LIFE_ICON_SRC = "source/ico-life.svg";
@@ -50,6 +51,7 @@ const state = {
   screen: "versionSelect",
   parrotMood: "idle",
   handwritingVersion: null,
+  isLargeWritingEnabled: false,
   currentQuestionIndex: 0,
   attemptsLeft: 3,
   activeLetterIndex: null,
@@ -88,9 +90,11 @@ function init() {
 function resetLessonState() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "versionSelect";
   state.parrotMood = "idle";
   state.handwritingVersion = null;
+  state.isLargeWritingEnabled = false;
   state.currentQuestionIndex = 0;
   state.attemptsLeft = 3;
   state.activeLetterIndex = null;
@@ -123,16 +127,30 @@ function isVersion3() {
   return state.handwritingVersion === "v3";
 }
 
+function isVersion4() {
+  return state.handwritingVersion === "v4";
+}
+
 function isVersion1() {
   return state.handwritingVersion === "v1";
 }
 
 function usesFocusedWriting() {
+  return isVersion1() || isVersion3() || (isVersion4() && state.isLargeWritingEnabled);
+}
+
+function allowsFocusClear() {
   return isVersion1() || isVersion3();
+}
+
+function usesDirectCurrentWriting() {
+  return isVersion2() || (isVersion4() && !state.isLargeWritingEnabled);
 }
 
 function getVersionDescription() {
   switch (state.handwritingVersion) {
+    case "v4":
+      return "버전 4 · A/B테스트 형";
     case "v2":
       return "버전 2 · 모든 칸 바로쓰기형";
     case "v3":
@@ -190,7 +208,7 @@ function handleAppClick(event) {
 
   if (
     state.screen === "input" &&
-    usesFocusedWriting() &&
+    allowsFocusClear() &&
     state.activeLetterIndex !== null &&
     !event.target.closest(".paper-box") &&
     !event.target.closest(".writing-mode-switch") &&
@@ -224,9 +242,7 @@ function handleAppClick(event) {
   if (previewBox) {
     const previewIndex = Number(previewBox.dataset.previewIndex);
     if (Number.isFinite(previewIndex)) {
-      state.activeLetterIndex = previewIndex;
-      ensureActiveBoxVisible({ behavior: "smooth" });
-      render();
+      focusInputBoxByIndex(previewIndex, { behavior: "smooth" });
       return;
     }
   }
@@ -240,8 +256,17 @@ function handleAppClick(event) {
 
   switch (action) {
     case "choose-version": {
-      const version = actionButton.dataset.version === "v2" ? "v2" : actionButton.dataset.version === "v3" ? "v3" : "v1";
+      const requestedVersion = actionButton.dataset.version;
+      const version =
+        requestedVersion === "v2"
+          ? "v2"
+          : requestedVersion === "v3"
+            ? "v3"
+            : requestedVersion === "v4"
+              ? "v4"
+              : "v1";
       state.handwritingVersion = version;
+      state.isLargeWritingEnabled = false;
       state.screen = "idle";
       state.parrotMood = "idle";
       resetCurrentQuestionProgress();
@@ -274,7 +299,7 @@ function handleAppClick(event) {
       moveViewport(3);
       break;
     case "clear-all":
-      if (state.screen === "input" && (isVersion2() || isVersion3())) {
+      if (state.screen === "input" && (isVersion2() || isVersion3() || isVersion4())) {
         state.isClearConfirmOpen = true;
         render();
       } else {
@@ -298,12 +323,35 @@ function handleAppClick(event) {
     }
     case "set-drawing-mode": {
       const mode = actionButton.dataset.mode;
-      if (mode === "pen" || mode === "eraser") {
+      if ((mode === "pen" || mode === "eraser") && state.toolMode !== mode) {
         state.toolMode = mode;
-        render();
+        refreshToolModeControls();
       }
       break;
     }
+    case "toggle-large-writing":
+      if (isVersion4()) {
+        stopPointerSession();
+        stopViewportDragSession();
+        stopViewportScrollAnimation();
+        state.isLargeWritingEnabled = !state.isLargeWritingEnabled;
+        if (state.activeLetterIndex === null && getCurrentQuestion().chars.length) {
+          state.activeLetterIndex = 0;
+        }
+        state.pendingViewportTarget =
+          state.activeLetterIndex === null
+            ? null
+            : {
+                type: "box",
+                index: state.activeLetterIndex,
+                align: "safe-center",
+                behavior: "smooth",
+                defer: true,
+                onlyIfNeeded: true,
+              };
+        refreshV4WritingModePresentation();
+      }
+      break;
     case "submit-answer":
       submitCurrentAnswer();
       break;
@@ -349,17 +397,15 @@ function handleAppPointerDown(event) {
   }
 
   if (usesFocusedWriting() && boxIndex !== state.activeLetterIndex) {
-    state.activeLetterIndex = boxIndex;
-    ensureActiveBoxVisible({ behavior: "smooth" });
-    render();
+    focusInputBoxByIndex(boxIndex, { behavior: "smooth" });
     return;
   }
 
-  if (isVersion2()) {
+  if (usesDirectCurrentWriting()) {
     const previousIndex = state.activeLetterIndex;
     state.activeLetterIndex = boxIndex;
     if (previousIndex !== boxIndex) {
-      refreshV2CurrentBoxState(previousIndex, boxIndex);
+      refreshCurrentBoxState(previousIndex, boxIndex);
     }
   }
 
@@ -545,10 +591,7 @@ function handleViewportDragEnd(event) {
   }
 
   const shouldClearFocus = session.shouldClearFocus && !session.didDrag;
-  state.viewportDragSession = null;
-  window.removeEventListener("pointermove", handleViewportDragMove);
-  window.removeEventListener("pointerup", handleViewportDragEnd);
-  window.removeEventListener("pointercancel", handleViewportDragEnd);
+  stopViewportDragSession();
 
   if (shouldClearFocus) {
     state.activeLetterIndex = null;
@@ -567,6 +610,26 @@ function stopPointerSession() {
   window.removeEventListener("pointercancel", handlePointerUp);
 }
 
+function stopViewportDragSession() {
+  const session = state.viewportDragSession;
+  state.viewportDragSession = null;
+  window.removeEventListener("pointermove", handleViewportDragMove);
+  window.removeEventListener("pointerup", handleViewportDragEnd);
+  window.removeEventListener("pointercancel", handleViewportDragEnd);
+
+  if (!session) {
+    return;
+  }
+
+  if (typeof session.viewport.releasePointerCapture === "function") {
+    try {
+      session.viewport.releasePointerCapture(session.pointerId);
+    } catch (error) {
+      // Pointer capture may already be released.
+    }
+  }
+}
+
 function getNormalizedPoint(event, canvas) {
   const rect = canvas.getBoundingClientRect();
   const x = clamp((event.clientX - rect.left) / rect.width, 0, 1);
@@ -577,6 +640,7 @@ function getNormalizedPoint(event, canvas) {
 function startTtsPhase() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "tts";
   state.parrotMood = "talking";
   render();
@@ -588,6 +652,7 @@ function startTtsPhase() {
 function enterInputPhase(preserveWriting) {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "input";
   state.parrotMood = "answering";
   state.disableInputEnterAnimation = preserveWriting;
@@ -596,14 +661,21 @@ function enterInputPhase(preserveWriting) {
   state.toolMode = "pen";
   if (!preserveWriting) {
     resetCurrentQuestionProgress();
-  } else if (usesFocusedWriting()) {
+  } else if (isVersion1() || isVersion3()) {
+    state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
+  } else if (isVersion4() && state.activeLetterIndex === null) {
     state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
   }
+  if (preserveWriting && shouldResetToFirstBoxOnRetry(state.handwritingVersion, state.isLargeWritingEnabled)) {
+    state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+    state.pendingViewportTarget = {
+      type: "start",
+      behavior: "smooth",
+      defer: true,
+    };
+  }
   if (usesFocusedWriting()) {
-    state.activeLetterIndex = getInitialActiveLetterIndex(state.handwritingVersion, getCurrentQuestion().chars.length);
     ensureActiveBoxVisible({ behavior: preserveWriting ? "smooth" : "auto", defer: preserveWriting });
-  } else {
-    state.activeLetterIndex = preserveWriting ? state.activeLetterIndex : null;
   }
   state.inputActivatedAt = performance.now();
   render();
@@ -612,6 +684,7 @@ function enterInputPhase(preserveWriting) {
 function enterWrongFeedbackPhase() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "wrongFeedback";
   state.parrotMood = "wrong";
   render();
@@ -627,6 +700,7 @@ function enterWrongFeedbackPhase() {
 function enterCorrectWaitingPhase() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "correctWaiting";
   state.parrotMood = "correct";
   render();
@@ -639,6 +713,7 @@ function enterCorrectWaitingPhase() {
 function enterFailedWaitingPhase() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "failedWaiting";
   state.parrotMood = "idle";
   render();
@@ -647,6 +722,7 @@ function enterFailedWaitingPhase() {
 function enterRevealPhase() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "reveal";
   state.parrotMood = "reveal";
   state.showGhostOverlay = false;
@@ -661,6 +737,7 @@ function goToNextQuestion() {
 
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.currentQuestionIndex += 1;
   state.attemptsLeft = 3;
   state.parrotMood = "talking";
@@ -673,6 +750,7 @@ function goToNextQuestion() {
 function enterResultScreen() {
   clearTimers();
   stopPointerSession();
+  stopViewportDragSession();
   state.screen = "result";
   state.parrotMood = "idle";
   state.isDebugOpen = false;
@@ -704,6 +782,27 @@ function moveViewport(step) {
   const nextScrollLeft = getViewportScrollTarget(viewport, step);
   state.lastScrollIntent = "nav";
   animateViewportScroll(viewport, nextScrollLeft);
+}
+
+function focusInputBoxByIndex(index, options = {}) {
+  if (!Number.isFinite(index)) {
+    return;
+  }
+
+  const previousIndex = state.activeLetterIndex;
+  state.activeLetterIndex = index;
+  ensureActiveBoxVisible({ behavior: options.behavior || "smooth" });
+
+  if (isVersion4() || usesDirectCurrentWriting()) {
+    if (previousIndex !== index) {
+      refreshCurrentBoxState(previousIndex, index);
+      return;
+    }
+    syncWritingViewport();
+    return;
+  }
+
+  render();
 }
 
 function ensureActiveBoxVisible(options = {}) {
@@ -782,7 +881,7 @@ function clearAllBoxes() {
     state.toolMode = "pen";
     ensureActiveBoxVisible({ behavior: "auto" });
   } else {
-    state.activeLetterIndex = getCurrentQuestion().chars.length ? 0 : null;
+    state.activeLetterIndex = isVersion2() ? null : getCurrentQuestion().chars.length ? 0 : null;
     state.toolMode = "pen";
   }
   render();
@@ -1088,6 +1187,11 @@ function renderVersionSelectScreen() {
             <strong class="version-card__title">확대형 + 오른쪽 도구</strong>
             <span class="version-card__body">현재 칸은 크게 쓰고, 도구는 오른쪽 dock에서 바꾸는 방식</span>
           </button>
+          <button class="version-card" data-action="choose-version" data-version="v4">
+            <span class="version-card__kicker">버전 4</span>
+            <strong class="version-card__title">A/B테스트 형</strong>
+            <span class="version-card__body">전체쓰기와 크게쓰기를 학생이 직접 전환하는 통합 모드</span>
+          </button>
         </div>
       </section>
     </main>
@@ -1127,6 +1231,10 @@ function renderInputScreen() {
 
   if (isVersion3()) {
     return renderInputScreenV3();
+  }
+
+  if (isVersion4()) {
+    return renderInputScreenV4();
   }
 
   return renderInputScreenV1();
@@ -1265,12 +1373,57 @@ function renderInputScreenV2() {
   `;
 }
 
+function renderInputScreenV4() {
+  const question = getCurrentQuestion();
+  const isWrongFeedback = state.screen === "wrongFeedback";
+
+  return `
+    <main class="screen input-screen input-screen--v2${currentScreenEnterClass ? ` ${currentScreenEnterClass}` : ""}">
+      <div class="screen__dim screen__dim--flat"></div>
+      <section class="input-shell input-shell--v2 screen__content">
+        <div class="activity-stack activity-stack--v2">
+          <div class="input-head">
+            ${renderLifeRow()}
+          </div>
+          <div class="preview-cluster preview-cluster--input">
+            <div class="preview-row preview-row--input" aria-label="preview letter boxes">
+              ${question.chars.map((char, index) => renderPreviewBox(char, index, "input")).join("")}
+            </div>
+          </div>
+          <div class="writing-zone writing-zone--v2">
+            <section class="writing-panel writing-panel--v4${state.isLargeWritingEnabled ? " is-large-mode" : ""}">
+              <button class="nav-rail nav-rail--prev" data-action="nav-prev" aria-label="이전 글자 칸">
+                <span aria-hidden="true">‹</span>
+              </button>
+              <div class="writing-viewport writing-viewport--v4">
+                <div class="writing-row writing-row--v4${isWrongFeedback ? " is-wrong" : ""}" data-writing-row>
+                  ${question.chars.map((_, index) => renderWritingBoxV4(index, isWrongFeedback)).join("")}
+                </div>
+              </div>
+              <button class="nav-rail nav-rail--next" data-action="nav-next" aria-label="다음 글자 칸">
+                <span aria-hidden="true">›</span>
+              </button>
+              ${renderLargeWritingToggle()}
+            </section>
+            ${renderToolDock({ isInteractive: !isWrongFeedback, includeClearAll: true })}
+          </div>
+          <div class="button-area button-area--input button-area--input-v2">
+            <button class="cta-button" data-action="submit-answer" ${canSubmitCurrentAnswer() && !isWrongFeedback ? "" : "disabled"}>
+              답안 제출
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
+}
+
 function renderWritingBoxV1(index, isWrongFeedback) {
   const box = state.currentBoxes[index];
   const isActive = index === state.activeLetterIndex;
   const isWarning = isWrongFeedback;
   const detectedText = box.detected;
-  const showCurrentClear = isVersion3() && isActive && !isWrongFeedback;
+  const showCurrentClear = (isVersion3() || isVersion4()) && isActive && !isWrongFeedback;
 
   return `
     <article class="writing-item${isActive ? " is-active" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
@@ -1317,6 +1470,29 @@ function renderWritingBoxV2(index, isWrongFeedback) {
   `;
 }
 
+function renderWritingBoxV4(index, isWrongFeedback) {
+  const box = state.currentBoxes[index];
+  const isWarning = isWrongFeedback;
+  const isCurrent = index === state.activeLetterIndex;
+  const detectedText = box.detected;
+  const isLargeMode = state.isLargeWritingEnabled;
+
+  return `
+    <article class="writing-item writing-item--v4${isLargeMode ? " is-large-mode" : ""}${isCurrent ? " is-current" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
+      <div class="writing-item__surface-shell writing-item__surface-shell--v2">
+        <div class="writing-item__surface writing-item__surface--v2">
+          <div class="paper-box paper-box--v4${isCurrent ? " is-current" : ""}${isWarning ? " is-warning" : ""}">
+            <div class="guide-grid" aria-hidden="true"></div>
+            <canvas class="letter-canvas" data-canvas-role="input" data-box-index="${index}" data-theme="input"></canvas>
+          </div>
+          ${isCurrent && !isWrongFeedback ? renderCurrentClearButton(index) : ""}
+        </div>
+      </div>
+      <div class="detected-pill detected-pill--v2${detectedText ? "" : " is-empty"}">${escapeHtml(detectedText)}</div>
+    </article>
+  `;
+}
+
 function renderCurrentClearButton(index) {
   return `
     <button
@@ -1344,6 +1520,24 @@ function renderDrawingModeSwitch() {
   `;
 }
 
+function renderLargeWritingToggle() {
+  return `
+    <div class="writing-size-toggle">
+      <span class="writing-size-toggle__label">크게 쓰기</span>
+      <button
+        class="writing-size-toggle__switch${state.isLargeWritingEnabled ? " is-on" : ""}"
+        data-action="toggle-large-writing"
+        type="button"
+        role="switch"
+        aria-checked="${state.isLargeWritingEnabled ? "true" : "false"}"
+        aria-label="크게 쓰기"
+      >
+        <span class="writing-size-toggle__thumb" aria-hidden="true"></span>
+      </button>
+    </div>
+  `;
+}
+
 function renderToolDock({ isInteractive, includeClearAll }) {
   return `
     <div class="tool-dock" aria-label="필기 도구">
@@ -1364,6 +1558,85 @@ function renderToolDock({ isInteractive, includeClearAll }) {
       }
     </div>
   `;
+}
+
+function refreshToolModeControls() {
+  const drawingButtons = app.querySelectorAll('[data-action="set-drawing-mode"][data-mode]');
+  drawingButtons.forEach((button) => {
+    const mode = button.dataset.mode;
+    const isActive = mode === state.toolMode;
+    button.classList.toggle("is-active", isActive);
+    const icon = button.querySelector("img");
+    if (!icon) {
+      return;
+    }
+
+    if (button.classList.contains("writing-mode-switch__button")) {
+      if (mode === "pen") {
+        icon.src = isActive ? PEN_ICON_BLACK_SRC : PEN_ICON_WHITE_SRC;
+      } else if (mode === "eraser") {
+        icon.src = isActive ? ERASER_ICON_BLACK_SRC : ERASER_ICON_WHITE_SRC;
+      }
+      return;
+    }
+
+    if (mode === "pen") {
+      icon.src = PEN_ICON_BLACK_SRC;
+    } else if (mode === "eraser") {
+      icon.src = ERASER_ICON_BLACK_SRC;
+    }
+  });
+}
+
+function refreshWritingSizeToggle() {
+  const toggle = app.querySelector('.writing-size-toggle__switch');
+  if (!toggle) {
+    return;
+  }
+
+  toggle.classList.toggle("is-on", state.isLargeWritingEnabled);
+  toggle.setAttribute("aria-checked", state.isLargeWritingEnabled ? "true" : "false");
+}
+
+function startWritingTransitionRefresh(duration = 260) {
+  const startedAt = performance.now();
+
+  const tick = (now) => {
+    setupCanvases();
+    if (now - startedAt < duration) {
+      window.requestAnimationFrame(tick);
+    }
+  };
+
+  window.requestAnimationFrame(tick);
+}
+
+function refreshV4WritingModePresentation() {
+  const panel = app.querySelector(".writing-panel--v4");
+  const viewport = app.querySelector(".writing-viewport--v4");
+  const row = app.querySelector(".writing-row--v4");
+
+  if (!panel || !viewport || !row) {
+    render();
+    return;
+  }
+
+  panel.classList.toggle("is-large-mode", state.isLargeWritingEnabled);
+  row.querySelectorAll(".writing-item--v4").forEach((item) => {
+    item.classList.toggle("is-large-mode", state.isLargeWritingEnabled);
+  });
+
+  refreshWritingSizeToggle();
+  refreshToolModeControls();
+  setupCanvases();
+  window.requestAnimationFrame(() => {
+    syncWritingViewport();
+    startWritingTransitionRefresh();
+    window.setTimeout(() => {
+      setupCanvases();
+      syncWritingViewport();
+    }, 280);
+  });
 }
 
 function renderPreviewBox(char, index, context) {
@@ -1615,24 +1888,34 @@ function refreshInputButtons() {
   });
 }
 
-function refreshV2CurrentBoxState(previousIndex, nextIndex) {
-  if (!isVersion2()) {
+function refreshCurrentBoxState(previousIndex, nextIndex) {
+  if (!usesDirectCurrentWriting() && !isVersion4()) {
     return;
   }
 
   const previousItem =
-    previousIndex === null ? null : app.querySelector(`.writing-item--v2[data-box-index="${previousIndex}"]`);
+    previousIndex === null
+      ? null
+      : app.querySelector(`.writing-item:is(.writing-item--v2, .writing-item--v4)[data-box-index="${previousIndex}"]`);
   const nextItem =
-    nextIndex === null ? null : app.querySelector(`.writing-item--v2[data-box-index="${nextIndex}"]`);
+    nextIndex === null
+      ? null
+      : app.querySelector(`.writing-item:is(.writing-item--v2, .writing-item--v4)[data-box-index="${nextIndex}"]`);
 
   if (previousItem) {
     previousItem.classList.remove("is-current");
-    previousItem.querySelector(".paper-box--v2")?.classList.remove("is-current");
+    previousItem.querySelector(".paper-box--v2, .paper-box--v4")?.classList.remove("is-current");
+    previousItem.querySelector(".writing-item__clear-current")?.remove();
   }
 
   if (nextItem) {
     nextItem.classList.add("is-current");
-    nextItem.querySelector(".paper-box--v2")?.classList.add("is-current");
+    nextItem.querySelector(".paper-box--v2, .paper-box--v4")?.classList.add("is-current");
+    if (state.screen === "input" && !nextItem.querySelector(".writing-item__clear-current")) {
+      nextItem
+        .querySelector(".writing-item__surface")
+        ?.insertAdjacentHTML("beforeend", renderCurrentClearButton(nextIndex));
+    }
   }
 
   const previousPreview =
@@ -1649,6 +1932,9 @@ function refreshV2CurrentBoxState(previousIndex, nextIndex) {
     }
     if (nextIndex !== null) {
       redrawCanvasesForBox(nextIndex);
+    }
+    if (isVersion4()) {
+      startWritingTransitionRefresh();
     }
     syncWritingViewport();
   });
@@ -1770,6 +2056,13 @@ function syncWritingViewport() {
     if (targetBox) {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
       viewport.scrollLeft = clamp(state.viewportScrollLeft, 0, maxScrollLeft);
+      if (pendingTarget.onlyIfNeeded && !isBoxOutsideSafeViewport(viewport, targetBox)) {
+        state.pendingViewportTarget = null;
+        bindViewportEvents(viewport);
+        syncViewportStateFromDom(viewport);
+        updateNavState(viewport);
+        return;
+      }
       const nextLeft =
         pendingTarget.align === "safe-center"
           ? getSafeViewportTarget(viewport, targetBox, maxScrollLeft)
@@ -1787,6 +2080,21 @@ function syncWritingViewport() {
       } else {
         applyScroll();
       }
+    }
+    state.pendingViewportTarget = null;
+  } else if (pendingTarget && pendingTarget.type === "start") {
+    const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    viewport.scrollLeft = clamp(state.viewportScrollLeft, 0, maxScrollLeft);
+    const applyScroll = () => {
+      animateViewportScroll(viewport, 0, {
+        immediate: (pendingTarget.behavior || "auto") === "auto",
+      });
+    };
+
+    if (pendingTarget.defer) {
+      window.requestAnimationFrame(applyScroll);
+    } else {
+      applyScroll();
     }
     state.pendingViewportTarget = null;
   } else if (state.viewportScrollLeft > 0) {
@@ -1945,23 +2253,20 @@ function getViewportScrollTarget(viewport, step) {
   return getSafeViewportTarget(viewport, items[targetIndex], maxScrollLeft);
 }
 
+function isBoxOutsideSafeViewport(viewport, targetBox) {
+  const safeLeft = readCssPixelValue("--writing-safe-left", 48);
+  const safeRight = readCssPixelValue("--writing-safe-right", 128);
+  const { boxLeft, boxRight } = getTargetBoxBounds(targetBox);
+  const viewLeft = viewport.scrollLeft;
+  const viewRight = viewport.scrollLeft + viewport.clientWidth;
+
+  return boxLeft < viewLeft + safeLeft || boxRight > viewRight - safeRight;
+}
+
 function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)) {
   const safeLeft = readCssPixelValue("--writing-safe-left", 48);
   const safeRight = readCssPixelValue("--writing-safe-right", 128);
-  const surfaceShell = targetBox.querySelector(".writing-item__surface-shell");
-  const paperBox = targetBox.querySelector(".paper-box");
-  const detectedPill = targetBox.querySelector(".detected-pill");
-  const shellLeft = surfaceShell ? targetBox.offsetLeft + surfaceShell.offsetLeft : targetBox.offsetLeft;
-  const shellRight = surfaceShell
-    ? shellLeft + surfaceShell.offsetWidth
-    : targetBox.offsetLeft + targetBox.offsetWidth;
-  const paperLeft = paperBox ? shellLeft + paperBox.offsetLeft : shellLeft;
-  const paperRight = paperBox ? paperLeft + paperBox.offsetWidth : shellRight;
-  const pillRight = detectedPill
-    ? targetBox.offsetLeft + detectedPill.offsetLeft + detectedPill.offsetWidth
-    : shellRight;
-  const boxLeft = Math.min(targetBox.offsetLeft, shellLeft);
-  const boxRight = Math.max(shellRight, pillRight);
+  const { boxLeft, boxRight } = getTargetBoxBounds(targetBox);
   const boxWidth = boxRight - boxLeft;
   const safeWidth = Math.max(1, viewport.clientWidth - safeLeft - safeRight);
 
@@ -1979,6 +2284,29 @@ function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, 
   }
 
   return clamp(nextLeft, 0, maxScrollLeft);
+}
+
+function getTargetBoxBounds(targetBox) {
+  const surfaceShell = targetBox.querySelector(".writing-item__surface-shell");
+  const paperBox = targetBox.querySelector(".paper-box");
+  const detectedPill = targetBox.querySelector(".detected-pill");
+  const shellLeft = surfaceShell ? targetBox.offsetLeft + surfaceShell.offsetLeft : targetBox.offsetLeft;
+  const shellRight = surfaceShell
+    ? shellLeft + surfaceShell.offsetWidth
+    : targetBox.offsetLeft + targetBox.offsetWidth;
+  const paperLeft = paperBox ? shellLeft + paperBox.offsetLeft : shellLeft;
+  const paperRight = paperBox ? paperLeft + paperBox.offsetWidth : shellRight;
+  const pillRight = detectedPill
+    ? targetBox.offsetLeft + detectedPill.offsetLeft + detectedPill.offsetWidth
+    : shellRight;
+  const boxLeft = Math.min(targetBox.offsetLeft, shellLeft);
+  const boxRight = Math.max(shellRight, pillRight);
+  return {
+    paperLeft,
+    paperRight,
+    boxLeft,
+    boxRight,
+  };
 }
 
 function readCssPixelValue(propertyName, fallback) {
