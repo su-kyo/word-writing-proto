@@ -52,6 +52,7 @@ const state = {
   parrotMood: "idle",
   handwritingVersion: null,
   isLargeWritingEnabled: false,
+  isFollowWritingEnabled: false,
   currentQuestionIndex: 0,
   attemptsLeft: 3,
   activeLetterIndex: null,
@@ -95,6 +96,7 @@ function resetLessonState() {
   state.parrotMood = "idle";
   state.handwritingVersion = null;
   state.isLargeWritingEnabled = false;
+  state.isFollowWritingEnabled = false;
   state.currentQuestionIndex = 0;
   state.attemptsLeft = 3;
   state.activeLetterIndex = null;
@@ -350,6 +352,12 @@ function handleAppClick(event) {
                 onlyIfNeeded: true,
               };
         refreshV4WritingModePresentation();
+      }
+      break;
+    case "toggle-follow-writing":
+      if (isVersion4()) {
+        state.isFollowWritingEnabled = !state.isFollowWritingEnabled;
+        render();
       }
       break;
     case "submit-answer":
@@ -985,6 +993,17 @@ function getQuestionProgressLabel() {
 }
 
 function getTeacherActions() {
+  const followWritingAction =
+    isVersion4() && ["input", "wrongFeedback"].includes(state.screen)
+      ? [
+          {
+            action: "toggle-follow-writing",
+            label: `따라쓰기 ${state.isFollowWritingEnabled ? "ON" : "OFF"}`,
+            variant: state.isFollowWritingEnabled ? "primary" : "ghost",
+          },
+        ]
+      : [];
+
   switch (state.screen) {
     case "idle":
       return [
@@ -994,7 +1013,7 @@ function getTeacherActions() {
     case "tts":
     case "input":
     case "wrongFeedback":
-      return [{ action: "finish-lesson", label: "종료", variant: "ghost" }];
+      return [{ action: "finish-lesson", label: "종료", variant: "ghost" }, ...followWritingAction];
     case "correctWaiting":
     case "failedWaiting":
       return [
@@ -1476,6 +1495,8 @@ function renderWritingBoxV4(index, isWrongFeedback) {
   const isCurrent = index === state.activeLetterIndex;
   const detectedText = box.detected;
   const isLargeMode = state.isLargeWritingEnabled;
+  const promptChar = getCurrentQuestion().chars[index];
+  const showPrompt = state.isFollowWritingEnabled && promptChar && promptChar !== " ";
 
   return `
     <article class="writing-item writing-item--v4${isLargeMode ? " is-large-mode" : ""}${isCurrent ? " is-current" : ""}" data-box-index="${index}" aria-label="letter box ${index + 1}">
@@ -1483,6 +1504,7 @@ function renderWritingBoxV4(index, isWrongFeedback) {
         <div class="writing-item__surface writing-item__surface--v2">
           <div class="paper-box paper-box--v4${isCurrent ? " is-current" : ""}${isWarning ? " is-warning" : ""}">
             <div class="guide-grid" aria-hidden="true"></div>
+            ${showPrompt ? `<span class="paper-box__prompt paper-box__prompt--v4">${escapeHtml(promptChar)}</span>` : ""}
             <canvas class="letter-canvas" data-canvas-role="input" data-box-index="${index}" data-theme="input"></canvas>
           </div>
           ${isCurrent && !isWrongFeedback ? renderCurrentClearButton(index) : ""}

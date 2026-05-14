@@ -893,6 +893,25 @@ img {
     background-color 160ms ease;
 }
 
+.paper-box__prompt {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(16, 23, 42, 0.16);
+  font-family: "Noto Serif KR", "Noto Serif", serif;
+  font-size: calc(var(--surface-width) * 0.68);
+  font-weight: 700;
+  letter-spacing: -0.08em;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.paper-box__prompt--v4 {
+  color: rgba(16, 23, 42, 0.12);
+}
+
 .writing-item.is-active .paper-box {
   box-shadow:
     inset 0 0 0 8px var(--color-blue),
@@ -955,6 +974,7 @@ img {
   inset: 0;
   width: 100%;
   height: 100%;
+  z-index: 1;
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
