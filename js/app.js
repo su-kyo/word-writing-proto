@@ -2266,21 +2266,26 @@ function isBoxOutsideSafeViewport(viewport, targetBox) {
 function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)) {
   const safeLeft = readCssPixelValue("--writing-safe-left", 48);
   const safeRight = readCssPixelValue("--writing-safe-right", 128);
-  const { boxLeft, boxRight } = getTargetBoxBounds(targetBox);
-  const boxWidth = boxRight - boxLeft;
+  const { paperLeft, paperRight, boxLeft, boxRight } = getTargetBoxBounds(targetBox);
+  const usePaperCentering = isVersion4() && state.isLargeWritingEnabled && targetBox.classList.contains("is-current");
+  const targetLeft = usePaperCentering ? paperLeft : boxLeft;
+  const targetRight = usePaperCentering ? paperRight : boxRight;
+  const targetWidth = targetRight - targetLeft;
   const safeWidth = Math.max(1, viewport.clientWidth - safeLeft - safeRight);
 
-  let nextLeft = boxLeft - safeLeft - Math.max(0, (safeWidth - boxWidth) * 0.5);
+  let nextLeft = usePaperCentering
+    ? targetLeft - Math.max(0, (viewport.clientWidth - targetWidth) * 0.5)
+    : targetLeft - safeLeft - Math.max(0, (safeWidth - targetWidth) * 0.5);
 
-  const visibleLeft = boxLeft - nextLeft;
-  const visibleRight = boxRight - nextLeft;
+  const visibleLeft = targetLeft - nextLeft;
+  const visibleRight = targetRight - nextLeft;
 
   if (visibleLeft < safeLeft) {
-    nextLeft = boxLeft - safeLeft;
+    nextLeft = targetLeft - safeLeft;
   }
 
   if (visibleRight > viewport.clientWidth - safeRight) {
-    nextLeft = boxRight - (viewport.clientWidth - safeRight);
+    nextLeft = targetRight - (viewport.clientWidth - safeRight);
   }
 
   return clamp(nextLeft, 0, maxScrollLeft);
