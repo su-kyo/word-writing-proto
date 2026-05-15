@@ -1641,6 +1641,9 @@ function refreshV4WritingModePresentation() {
     return;
   }
 
+  const wasLargeMode = panel.classList.contains("is-large-mode");
+  const enteringLargeMode = !wasLargeMode && state.isLargeWritingEnabled;
+  const leavingLargeMode = wasLargeMode && !state.isLargeWritingEnabled;
   const activeIndex = state.activeLetterIndex;
   const currentPaper =
     activeIndex === null
@@ -1651,7 +1654,6 @@ function refreshV4WritingModePresentation() {
     currentPaper
       ? currentPaper.getBoundingClientRect().left + currentPaper.getBoundingClientRect().width * 0.5 - viewportRect.left
       : null;
-  const startScrollLeft = viewport.scrollLeft;
 
   panel.classList.toggle("is-large-mode", state.isLargeWritingEnabled);
   row.querySelectorAll(".writing-item--v4").forEach((item) => {
@@ -1661,32 +1663,40 @@ function refreshV4WritingModePresentation() {
   refreshWritingSizeToggle();
   refreshToolModeControls();
   setupCanvases();
-  const keepActivePaperAnchored = () => {
-    if (activeIndex === null || anchorCenter === null) {
+  syncViewportStateFromDom(viewport);
+  updateNavState(viewport);
+
+  if (enteringLargeMode) {
+    keepV4CurrentPaperContained();
+    startWritingTransitionRefresh(280, keepV4CurrentPaperContained);
+    return;
+  }
+
+  if (leavingLargeMode && activeIndex !== null && anchorCenter !== null) {
+    const keepPaperAnchor = () => {
+      const nextPaper = row.querySelector(`.writing-item--v4[data-box-index="${activeIndex}"] .paper-box--v4`);
+      if (!nextPaper) {
+        syncViewportStateFromDom(viewport);
+        updateNavState(viewport);
+        return;
+      }
+
+      const nextViewportRect = viewport.getBoundingClientRect();
+      const nextRect = nextPaper.getBoundingClientRect();
+      const nextCenter = nextRect.left + nextRect.width * 0.5 - nextViewportRect.left;
+      const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      viewport.scrollLeft = clamp(viewport.scrollLeft + (nextCenter - anchorCenter), 0, maxScrollLeft);
+      state.viewportScrollLeft = viewport.scrollLeft;
       syncViewportStateFromDom(viewport);
       updateNavState(viewport);
-      return;
-    }
+    };
 
-    const nextPaper = row.querySelector(`.writing-item--v4[data-box-index="${activeIndex}"] .paper-box--v4`);
-    if (!nextPaper) {
-      syncViewportStateFromDom(viewport);
-      updateNavState(viewport);
-      return;
-    }
+    keepPaperAnchor();
+    startWritingTransitionRefresh(280, keepPaperAnchor);
+    return;
+  }
 
-    const nextViewportRect = viewport.getBoundingClientRect();
-    const nextRect = nextPaper.getBoundingClientRect();
-    const nextCenter = nextRect.left + nextRect.width * 0.5 - nextViewportRect.left;
-    const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-    viewport.scrollLeft = clamp(viewport.scrollLeft + (nextCenter - anchorCenter), 0, maxScrollLeft);
-    state.viewportScrollLeft = viewport.scrollLeft;
-    syncViewportStateFromDom(viewport);
-    updateNavState(viewport);
-  };
-
-  keepActivePaperAnchored();
-  startWritingTransitionRefresh(280, keepActivePaperAnchored);
+  startWritingTransitionRefresh(280);
 }
 
 function renderPreviewBox(char, index, context) {
@@ -1984,10 +1994,82 @@ function refreshCurrentBoxState(previousIndex, nextIndex) {
       redrawCanvasesForBox(nextIndex);
     }
     if (isVersion4()) {
-      startWritingTransitionRefresh();
+      if (state.isLargeWritingEnabled) {
+        state.pendingViewportTarget = null;
+        stopViewportScrollAnimation();
+        recenterV4CurrentPaper();
+        startWritingTransitionRefresh(280, recenterV4CurrentPaper);
+      } else {
+        startWritingTransitionRefresh(280);
+        syncWritingViewport();
+      }
+      return;
     }
+
     syncWritingViewport();
   });
+}
+
+function recenterV4CurrentPaper() {
+  if (!isVersion4() || !state.isLargeWritingEnabled || state.activeLetterIndex === null) {
+    return;
+  }
+
+  const viewport = app.querySelector(".writing-viewport--v4");
+  const row = app.querySelector(".writing-row--v4");
+  if (!viewport || !row) {
+    return;
+  }
+
+  const targetBox = row.querySelector(`.writing-item--v4[data-box-index="${state.activeLetterIndex}"]`);
+  if (!targetBox) {
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+  const targetLeft = getSafeViewportTarget(viewport, targetBox, maxScrollLeft);
+  const delta = targetLeft - viewport.scrollLeft;
+
+  if (Math.abs(delta) < 0.5) {
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+    return;
+  }
+
+  viewport.scrollLeft = clamp(viewport.scrollLeft + delta * 0.22, 0, maxScrollLeft);
+  state.viewportScrollLeft = viewport.scrollLeft;
+  syncViewportStateFromDom(viewport);
+  updateNavState(viewport);
+}
+
+function keepV4CurrentPaperContained() {
+  if (!isVersion4() || !state.isLargeWritingEnabled || state.activeLetterIndex === null) {
+    return;
+  }
+
+  const viewport = app.querySelector(".writing-viewport--v4");
+  const row = app.querySelector(".writing-row--v4");
+  if (!viewport || !row) {
+    return;
+  }
+
+  const targetBox = row.querySelector(`.writing-item--v4[data-box-index="${state.activeLetterIndex}"]`);
+  if (!targetBox) {
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+  const nextLeft = getContainedViewportTarget(viewport, targetBox, maxScrollLeft);
+  if (Math.abs(nextLeft - viewport.scrollLeft) < 0.5) {
+    syncViewportStateFromDom(viewport);
+    updateNavState(viewport);
+    return;
+  }
+
+  viewport.scrollLeft = nextLeft;
+  state.viewportScrollLeft = nextLeft;
+  syncViewportStateFromDom(viewport);
+  updateNavState(viewport);
 }
 
 function drawCanvas(canvas) {
@@ -2317,6 +2399,13 @@ function isBoxOutsideSafeViewport(viewport, targetBox) {
   const { boxLeft, boxRight } = getTargetBoxBounds(targetBox);
   const viewLeft = viewport.scrollLeft;
   const viewRight = viewport.scrollLeft + viewport.clientWidth;
+  const usePaperCentering = isVersion4() && state.isLargeWritingEnabled && targetBox.classList.contains("is-current");
+
+  if (usePaperCentering) {
+    const { paperLeft, paperRight } = getTargetBoxBounds(targetBox);
+    const edgePadding = 8;
+    return paperLeft < viewLeft + edgePadding || paperRight > viewRight - edgePadding;
+  }
 
   return boxLeft < viewLeft + safeLeft || boxRight > viewRight - safeRight;
 }
@@ -2331,9 +2420,11 @@ function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, 
   const targetWidth = targetRight - targetLeft;
   const safeWidth = Math.max(1, viewport.clientWidth - safeLeft - safeRight);
 
-  let nextLeft = usePaperCentering
-    ? targetLeft - Math.max(0, (viewport.clientWidth - targetWidth) * 0.5)
-    : targetLeft - safeLeft - Math.max(0, (safeWidth - targetWidth) * 0.5);
+  if (usePaperCentering) {
+    return clamp(targetLeft - Math.max(0, (viewport.clientWidth - targetWidth) * 0.5), 0, maxScrollLeft);
+  }
+
+  let nextLeft = targetLeft - safeLeft - Math.max(0, (safeWidth - targetWidth) * 0.5);
 
   const visibleLeft = targetLeft - nextLeft;
   const visibleRight = targetRight - nextLeft;
@@ -2344,6 +2435,29 @@ function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, 
 
   if (visibleRight > viewport.clientWidth - safeRight) {
     nextLeft = targetRight - (viewport.clientWidth - safeRight);
+  }
+
+  return clamp(nextLeft, 0, maxScrollLeft);
+}
+
+function getContainedViewportTarget(
+  viewport,
+  targetBox,
+  maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+) {
+  const edgePadding = 12;
+  const { paperLeft, paperRight } = getTargetBoxBounds(targetBox);
+  const viewLeft = viewport.scrollLeft;
+  const viewRight = viewport.scrollLeft + viewport.clientWidth;
+
+  let nextLeft = viewLeft;
+
+  if (paperLeft < viewLeft + edgePadding) {
+    nextLeft = paperLeft - edgePadding;
+  }
+
+  if (paperRight > viewRight - edgePadding) {
+    nextLeft = paperRight - viewport.clientWidth + edgePadding;
   }
 
   return clamp(nextLeft, 0, maxScrollLeft);
