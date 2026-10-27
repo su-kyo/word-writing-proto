@@ -7,12 +7,12 @@ const QUESTION_TEXTS = [
 ];
 
 const PARROT_IMAGES = {
-  idle: "source/parrot_idle.png",
-  talking: "source/parrot_talking.png",
-  answering: "source/parrot_answering.png",
-  correct: "source/parrot_correct.png",
-  wrong: "source/parrot_wrong.png",
-  reveal: "source/parrot_reveal.png",
+  idle: "source/parrot_idle.webp",
+  talking: "source/parrot_talking.webp",
+  answering: "source/parrot_answering.webp",
+  correct: "source/parrot_correct.webp",
+  wrong: "source/parrot_wrong.webp",
+  reveal: "source/parrot_reveal.webp",
 };
 
 const {
@@ -71,7 +71,6 @@ const state = {
   pendingViewportTarget: null,
   inputActivatedAt: 0,
   disableInputEnterAnimation: false,
-  lastScrollIntent: null,
   timers: [],
 };
 
@@ -181,12 +180,26 @@ function queueTimer(callback, delay) {
   state.timers.push(timerId);
 }
 
+// visualViewport scroll/resize는 모바일에서 연속 발화하므로
+// 가벼운 높이 동기화는 프레임당 1회, 무거운 캔버스 재구성은 잠잠해진 뒤 1회만 실행한다.
+let resizeFrameId = 0;
+let canvasResizeTimerId = 0;
+
 function handleResize() {
-  syncAppHeight();
-  if (["input", "wrongFeedback", "correctWaiting", "failedWaiting", "reveal", "result"].includes(state.screen)) {
-    setupCanvases();
-    window.requestAnimationFrame(syncWritingViewport);
+  if (!resizeFrameId) {
+    resizeFrameId = window.requestAnimationFrame(() => {
+      resizeFrameId = 0;
+      syncAppHeight();
+    });
   }
+
+  window.clearTimeout(canvasResizeTimerId);
+  canvasResizeTimerId = window.setTimeout(() => {
+    if (["input", "wrongFeedback", "correctWaiting", "failedWaiting", "reveal", "result"].includes(state.screen)) {
+      setupCanvases();
+      window.requestAnimationFrame(syncWritingViewport);
+    }
+  }, 120);
 }
 
 function handleKeyDown(event) {
@@ -656,7 +669,6 @@ function enterInputPhase(preserveWriting) {
   state.parrotMood = "answering";
   state.disableInputEnterAnimation = preserveWriting;
   state.pendingViewportTarget = null;
-  state.lastScrollIntent = null;
   state.toolMode = "pen";
   if (!preserveWriting) {
     resetCurrentQuestionProgress();
@@ -779,7 +791,6 @@ function moveViewport(step) {
   }
 
   const nextScrollLeft = getViewportScrollTarget(viewport, step);
-  state.lastScrollIntent = "nav";
   animateViewportScroll(viewport, nextScrollLeft);
 }
 
@@ -810,7 +821,6 @@ function ensureActiveBoxVisible(options = {}) {
     return;
   }
 
-  state.lastScrollIntent = "focus";
   state.pendingViewportTarget = {
     type: "box",
     index: state.activeLetterIndex,
@@ -1140,11 +1150,11 @@ function renderParrotStage() {
   return `
     <section class="parrot-stage" aria-hidden="true">
       <div class="parrot-stage__set">
-        <img class="speaker speaker--left" src="source/speaker.png" alt="" />
+        <img class="speaker speaker--left" src="source/speaker.webp" alt="" />
         <div class="parrot-wrap">
           <img class="parrot-visual" src="${PARROT_IMAGES[state.parrotMood]}" alt="" />
         </div>
-        <img class="speaker speaker--right" src="source/speaker.png" alt="" />
+        <img class="speaker speaker--right" src="source/speaker.webp" alt="" />
       </div>
     </section>
   `;
@@ -1197,12 +1207,19 @@ function renderVersionSelectScreen() {
             <strong class="version-card__title">확대형 + 오른쪽 도구</strong>
             <span class="version-card__body">현재 칸은 크게 쓰고, 도구는 오른쪽 dock에서 바꾸는 방식</span>
           </button>
-          <button class="version-card" data-action="choose-version" data-version="v4">
-            <span class="version-card__kicker">버전 4</span>
+          <button class="version-card is-confirmed" data-action="choose-version" data-version="v4">
+            <span class="version-card__tags">
+              <span class="version-card__kicker">버전 4</span>
+              <span class="version-card__confirmed">확정</span>
+            </span>
             <strong class="version-card__title">A/B테스트 형</strong>
             <span class="version-card__body">전체쓰기와 크게쓰기를 학생이 직접 전환하는 통합 모드</span>
           </button>
         </div>
+        <p class="version-picker__note">
+          <strong>흐름 확인용 프로토타입</strong>
+          TTS 음성은 실제로 재생되지 않고, 손글씨 글자 인식도 아직 구현하지 않았어요.
+        </p>
       </section>
     </main>
   `;
@@ -1228,6 +1245,10 @@ function renderTtsScreen() {
       <div class="screen__dim screen__dim--soft"></div>
       <section class="tts-card screen__content">
         <h1 class="tts-card__title">선생님 화면에서 재생되는 문장을 잘 들어주세요!</h1>
+        <div class="tts-card__answer">
+          <span class="tts-card__answer-label">프로토타입 전용 · 지금 재생되는 문장</span>
+          <strong class="tts-card__answer-text">${escapeHtml(getCurrentQuestion().text)}</strong>
+        </div>
         <p class="tts-card__body">3초 뒤에 손글씨 입력 화면으로 자동 전환됩니다.</p>
       </section>
     </main>
@@ -1555,7 +1576,7 @@ function renderToolDock({ isInteractive, includeClearAll }) {
   return `
     <div class="tool-dock" aria-label="필기 도구">
       <button class="tool-dock__button${state.toolMode === "pen" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="pen" aria-label="펜" ${isInteractive ? "" : "disabled"}>
-        <img src="${state.toolMode === "pen" ? PEN_ICON_BLACK_SRC : PEN_ICON_BLACK_SRC}" alt="" />
+        <img src="${PEN_ICON_BLACK_SRC}" alt="" />
       </button>
       <button class="tool-dock__button${state.toolMode === "eraser" ? " is-active" : ""}" data-action="set-drawing-mode" data-mode="eraser" aria-label="지우개" ${isInteractive ? "" : "disabled"}>
         <img src="${ERASER_ICON_BLACK_SRC}" alt="" />
@@ -1865,7 +1886,11 @@ function renderResultScreen() {
       <section class="result-screen screen__content">
         <header class="result-header">
           <p class="result-header__eyebrow">받아쓰기</p>
-          <div class="result-ribbon">타이틀을 입력해주세요.</div>
+          <div class="result-ribbon">
+            <span class="result-ribbon__star" aria-hidden="true">✦</span>
+            <h1 class="result-ribbon__title">타이틀을 입력해주세요.</h1>
+            <span class="result-ribbon__star" aria-hidden="true">✦</span>
+          </div>
         </header>
         <section class="result-questions">
           ${state.questions.map((question, questionIndex) => renderResultCard(question, questionIndex)).join("")}
@@ -2187,13 +2212,6 @@ function syncWritingViewport() {
     const targetBox = app.querySelector(`.writing-item[data-box-index="${pendingTarget.index}"]`);
     if (targetBox) {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
-      if (pendingTarget.onlyIfNeeded && !isBoxOutsideSafeViewport(viewport, targetBox)) {
-        state.pendingViewportTarget = null;
-        bindViewportEvents(viewport);
-        syncViewportStateFromDom(viewport);
-        updateNavState(viewport);
-        return;
-      }
       const nextLeft =
         pendingTarget.align === "safe-center"
           ? getSafeViewportTarget(viewport, targetBox, maxScrollLeft)
@@ -2393,26 +2411,9 @@ function getViewportScrollTarget(viewport, step) {
   return getSafeViewportTarget(viewport, items[targetIndex], maxScrollLeft);
 }
 
-function isBoxOutsideSafeViewport(viewport, targetBox) {
-  const safeLeft = readCssPixelValue("--writing-safe-left", 48);
-  const safeRight = readCssPixelValue("--writing-safe-right", 128);
-  const { boxLeft, boxRight } = getTargetBoxBounds(targetBox);
-  const viewLeft = viewport.scrollLeft;
-  const viewRight = viewport.scrollLeft + viewport.clientWidth;
-  const usePaperCentering = isVersion4() && state.isLargeWritingEnabled && targetBox.classList.contains("is-current");
-
-  if (usePaperCentering) {
-    const { paperLeft, paperRight } = getTargetBoxBounds(targetBox);
-    const edgePadding = 8;
-    return paperLeft < viewLeft + edgePadding || paperRight > viewRight - edgePadding;
-  }
-
-  return boxLeft < viewLeft + safeLeft || boxRight > viewRight - safeRight;
-}
-
 function getSafeViewportTarget(viewport, targetBox, maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)) {
-  const safeLeft = readCssPixelValue("--writing-safe-left", 48);
-  const safeRight = readCssPixelValue("--writing-safe-right", 128);
+  const safeLeft = readCssPixelValue("--writing-safe-left", 42);
+  const safeRight = readCssPixelValue("--writing-safe-right", 132);
   const { paperLeft, paperRight, boxLeft, boxRight } = getTargetBoxBounds(targetBox);
   const usePaperCentering = isVersion4() && state.isLargeWritingEnabled && targetBox.classList.contains("is-current");
   const targetLeft = usePaperCentering ? paperLeft : boxLeft;
